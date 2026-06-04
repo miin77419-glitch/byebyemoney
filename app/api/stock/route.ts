@@ -4,13 +4,24 @@ export const dynamic = "force-dynamic";
 
 interface DayHigh { date: string; high: number }
 
-// ── TWSE 台股：逐月抓歷史最高價 ──────────────────────────────────────────
-async function fetchTWMaxHigh(ticker: string, sellDate: string): Promise<{ maxHigh: number | null; maxHighDate: string | null; lastClose: number | null }> {
-  const sell = new Date(sellDate);
+// Return day after date as YYYY-MM-DD
+function nextDay(date: string): string {
+  const d = new Date(date);
+  d.setDate(d.getDate() + 1);
+  return d.toISOString().split("T")[0];
+}
+
+// ── TWSE 台股 ─────────────────────────────────────────────────────────────
+async function fetchTWMaxHigh(
+  ticker: string,
+  sellDate: string,
+  includeToday: boolean
+): Promise<{ maxHigh: number | null; maxHighDate: string | null; lastClose: number | null }> {
+  const startDate = includeToday ? sellDate : nextDay(sellDate);
+  const sell = new Date(startDate);
   const now  = new Date();
   const months: string[] = [];
 
-  // collect YYYYMMDD for first day of each month in range
   let cur = new Date(sell.getFullYear(), sell.getMonth(), 1);
   while (cur <= now) {
     const y = cur.getFullYear();
@@ -25,31 +36,22 @@ async function fetchTWMaxHigh(ticker: string, sellDate: string): Promise<{ maxHi
     months.map(async (dateStr) => {
       try {
         const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${ticker}`;
-        const res = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0" },
-          next: { revalidate: 3600 },
-        });
+        const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, next: { revalidate: 3600 } });
         if (!res.ok) return;
         const json = await res.json();
         if (json.stat !== "OK" || !json.data) return;
 
         for (const row of json.data) {
-          // row[0] = date (ROC, e.g. "115/01/02"), row[4] = high, row[6] = close
-          const rocDate: string = row[0]; // "115/01/02"
-          const high = parseFloat((row[4] as string).replace(/,/g, ""));
+          const rocDate: string = row[0];
+          const high  = parseFloat((row[4] as string).replace(/,/g, ""));
           if (isNaN(high)) continue;
-
-          // Convert ROC year to Gregorian
           const [rocY, m, d] = rocDate.split("/");
-          const gYear = parseInt(rocY) + 1911;
-          const isoDate = `${gYear}-${m}-${d}`;
-
-          // Only include rows >= sellDate
-          if (isoDate >= sellDate) {
+          const isoDate = `${parseInt(rocY) + 1911}-${m}-${d}`;
+          if (isoDate >= startDate) {
             rows.push({ date: isoDate, high });
           }
         }
-      } catch { /* skip failed months */ }
+      } catch { /* skip */ }
     })
   );
 
@@ -61,7 +63,7 @@ async function fetchTWMaxHigh(ticker: string, sellDate: string): Promise<{ maxHi
     if (r.high > maxHigh) { maxHigh = r.high; maxHighDate = r.date; }
   }
 
-  // last close: fetch current month
+  // last close
   let lastClose: number | null = null;
   try {
     const y = now.getFullYear();
@@ -82,8 +84,13 @@ async function fetchTWMaxHigh(ticker: string, sellDate: string): Promise<{ maxHi
 }
 
 // ── Yahoo Finance 美股 ────────────────────────────────────────────────────
-async function fetchUSMaxHigh(ticker: string, sellDate: string): Promise<{ maxHigh: number | null; maxHighDate: string | null; lastClose: number | null }> {
-  const sellTimestamp = Math.floor(new Date(sellDate).getTime() / 1000);
+async function fetchUSMaxHigh(
+  ticker: string,
+  sellDate: string,
+  includeToday: boolean
+): Promise<{ maxHigh: number | null; maxHighDate: string | null; lastClose: number | null }> {
+  const startDate = includeToday ? sellDate : nextDay(sellDate);
+  const sellTimestamp = Math.floor(new Date(startDate).getTime() / 1000);
   const nowTimestamp  = Math.floor(Date.now() / 1000);
 
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&period1=${sellTimestamp}&period2=${nowTimestamp}`;
@@ -125,9 +132,10 @@ async function fetchUSMaxHigh(ticker: string, sellDate: string): Promise<{ maxHi
 // ── Handler ───────────────────────────────────────────────────────────────
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const ticker   = searchParams.get("ticker");
-  const market   = searchParams.get("market");
-  const sellDate = searchParams.get("sellDate");
+  const ticker       = searchParams.get("ticker");
+  const market       = searchParams.get("market");
+  const sellDate     = searchParams.get("sellDate");
+  const includeToday = searchParams.get("includeToday") === "true";
 
   if (!ticker || !market || !sellDate) {
     return NextResponse.json({ error: "Missing params" }, { status: 400 });
@@ -135,11 +143,10 @@ export async function GET(request: NextRequest) {
 
   try {
     if (market === "TW") {
-      const { maxHigh, maxHighDate, lastClose } = await fetchTWMaxHigh(ticker, sellDate);
-      return NextResponse.json({ symbol: ticker, currency: "TWD", maxHigh, maxHighDate, lastClose });
+      const result = await fetchTWMaxHigh(ticker, sellDate, includeToday);
+      return NextResponse.json({ symbol: ticker, currency: "TWD", ...result });
     } else {
-      const { maxHigh, maxHighDate, lastClose } = await fetchUSMaxHigh(ticker, sellDate);
-      // Get shortName from Yahoo
+      const result = await fetchUSMaxHigh(ticker, sellDate, includeToday);
       let shortName = ticker;
       try {
         const qr = await fetch(
@@ -151,7 +158,7 @@ export async function GET(request: NextRequest) {
           shortName = qd.quoteResponse?.result?.[0]?.shortName ?? ticker;
         }
       } catch { /* ignore */ }
-      return NextResponse.json({ symbol: ticker, shortName, currency: "USD", maxHigh, maxHighDate, lastClose });
+      return NextResponse.json({ symbol: ticker, shortName, currency: "USD", ...result });
     }
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
