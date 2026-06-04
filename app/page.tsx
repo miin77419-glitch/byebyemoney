@@ -1,11 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import YBSGTab from "@/components/YBSGTab";
+import TimeMachineTab from "@/components/TimeMachineTab";
 import RecordsTab from "@/components/RecordsTab";
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"records" | "ybsg">("records");
+  const [activeTab, setActiveTab] = useState<"records" | "timemachine">("records");
 
   return (
     <div className="min-h-screen" style={{ background: "var(--bg)" }}>
@@ -25,12 +25,12 @@ export default function Home() {
         <div className="max-w-5xl mx-auto px-4">
           <div className="flex gap-1 pt-3">
             {[
-              { key: "records", label: "💊 後悔藥" },
-              { key: "ybsg",    label: "📈 YBSG" },
+              { key: "records",     label: "💊 後悔藥" },
+              { key: "timemachine", label: "⏳ 時光機" },
             ].map(({ key, label }) => (
               <button
                 key={key}
-                onClick={() => setActiveTab(key as "records" | "ybsg")}
+                onClick={() => setActiveTab(key as "records" | "timemachine")}
                 className="px-5 py-2.5 text-sm font-medium rounded-t-lg transition-all cursor-pointer"
                 style={
                   activeTab === key
@@ -48,13 +48,13 @@ export default function Home() {
       {/* Content */}
       <main className="max-w-5xl mx-auto px-4 py-6">
         <div className="fade-in" key={activeTab}>
-          {activeTab === "records" ? <RecordsTab /> : <YBSGTab />}
+          {activeTab === "records" ? <RecordsTab /> : <TimeMachineTab />}
         </div>
       </main>
 
       {/* Footer */}
       <footer className="text-center py-6 text-xs" style={{ color: "var(--fg-subtle)" }}>
-        資料僅儲存在您的瀏覽器本機，重新整理不會消失，但換瀏覽器就沒了 🫥
+        所有資料僅儲存在您的瀏覽器本機，不上傳任何伺服器 🔒
       </footer>
     </div>
   );

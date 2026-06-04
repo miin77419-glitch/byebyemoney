@@ -1,7 +1,13 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine, ReferenceDot,
+} from "recharts";
+import { ChevronDown, ChevronUp, RefreshCw, Trash2, Plus, X } from "lucide-react";
 
+// ── Types ─────────────────────────────────────────────────────────────────
 interface SaleRecord {
   id: string;
   ticker: string;
@@ -19,97 +25,122 @@ interface SaleRecord {
   fetchError?: string;
 }
 
-const STORAGE_KEY = "byebyemoney_records_v2";
+interface DayOHLC { high: number; low: number; close?: number }
+interface ChartRow  { date: string; close: number }
 
+// ── localStorage ──────────────────────────────────────────────────────────
+const STORAGE_KEY = "byebyemoney_records_v2";
 function loadRecords(): SaleRecord[] {
   if (typeof window === "undefined") return [];
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]"); } catch { return []; }
 }
 function saveRecords(r: SaleRecord[]) { localStorage.setItem(STORAGE_KEY, JSON.stringify(r)); }
 
-function fmt(n: number, decimals = 2) {
-  return n.toLocaleString("zh-TW", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+// ── Helpers ───────────────────────────────────────────────────────────────
+function fmt(n: number, d = 2) {
+  return n.toLocaleString("zh-TW", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
-function fmtCurrency(n: number, currency: string) {
-  return currency === "TWD" ? `NT$ ${fmt(n, 0)}` : `$${fmt(n)}`;
+function fmtP(n: number, currency: string) {
+  return currency === "TWD" ? `NT$ ${fmt(n, 0)}` : `$${fmt(n)}`;
 }
 
 const cardStyle  = { background: "var(--bg-card)",  border: "1px solid var(--border)" };
-const inputStyle = { background: "var(--bg-input)", border: "1px solid var(--border)", color: "var(--fg)" };
+const inputStyle: React.CSSProperties = {
+  background: "var(--bg-input)", border: "1px solid var(--border)", color: "var(--fg)",
+  borderRadius: "0.5rem", padding: "0.5rem 0.75rem", fontSize: "0.875rem",
+  width: "100%", outline: "none",
+};
 
+// ── Main Component ────────────────────────────────────────────────────────
 export default function RecordsTab() {
   const [records,   setRecords]   = useState<SaleRecord[]>([]);
   const [showForm,  setShowForm]  = useState(false);
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [chartCache, setChartCache] = useState<Record<string, ChartRow[]>>({});
+  const [chartLoading, setChartLoading] = useState<string | null>(null);
+
+  // FX rate
   const [usdToTwd,  setUsdToTwd]  = useState<number | null>(null);
   const [fxUpdated, setFxUpdated] = useState<string | null>(null);
   const [fxFallback, setFxFallback] = useState(false);
 
   // Form state
-  const [ticker,   setTicker]   = useState("");
-  const [market,   setMarket]   = useState<"TW" | "US">("TW");
-  const [sellDate, setSellDate] = useState(new Date().toISOString().split("T")[0]);
+  const [market,    setMarket]    = useState<"TW" | "US">("TW");
+  const [twInputMode, setTwInputMode] = useState<"ticker" | "name">("ticker");
+  const [tickerRaw, setTickerRaw] = useState("");
+  const [resolvedTicker, setResolvedTicker] = useState<{ ticker: string; name: string } | null>(null);
+  const [lookupState, setLookupState] = useState<"idle" | "loading" | "found" | "error">("idle");
+  const [sellDate,  setSellDate]  = useState(new Date().toISOString().split("T")[0]);
+  const [dayOHLC,   setDayOHLC]  = useState<DayOHLC | null>(null);
+  const [dayLoading, setDayLoading] = useState(false);
   const [sellPrice, setSellPrice] = useState("");
-  const [shares,   setShares]   = useState("");
-  const [note,     setNote]     = useState("");
-
-  // Ticker lookup
-  const [lookupLoading, setLookupLoading] = useState(false);
-  const [lookupResult,  setLookupResult]  = useState<{ name: string; ticker: string } | null>(null);
-  const [lookupError,   setLookupError]   = useState("");
+  const [shares,    setShares]    = useState("");
+  const [note,      setNote]      = useState("");
   const lookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dayTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Load on mount
   useEffect(() => {
     setRecords(loadRecords());
-    // fetch USD→TWD rate
     fetch("/api/fx").then(r => r.json()).then(d => {
       setUsdToTwd(d.rate);
       setFxFallback(!!d.fallback);
       if (d.updatedAt) {
-        // format: "Thu, 05 Jun 2026 00:02:31 +0000" → just date
-        try { setFxUpdated(new Date(d.updatedAt).toLocaleDateString("zh-TW")); } catch { setFxUpdated(null); }
+        try { setFxUpdated(new Date(d.updatedAt).toLocaleDateString("zh-TW")); } catch { /**/ }
       }
     }).catch(() => { setUsdToTwd(32.5); setFxFallback(true); });
   }, []);
 
   const persistRecords = (r: SaleRecord[]) => { setRecords(r); saveRecords(r); };
 
-  // Auto-lookup ticker/name as user types
+  // ── Ticker / name lookup (debounced) ─────────────────────────────────
   useEffect(() => {
-    if (!ticker.trim()) { setLookupResult(null); setLookupError(""); return; }
+    const raw = tickerRaw.trim();
+    if (!raw) { setResolvedTicker(null); setLookupState("idle"); return; }
     if (lookupTimer.current) clearTimeout(lookupTimer.current);
+    setLookupState("loading");
     lookupTimer.current = setTimeout(async () => {
-      setLookupLoading(true);
-      setLookupError("");
       try {
-        const res = await fetch(`/api/stocks/lookup?code=${encodeURIComponent(ticker.trim())}`);
+        const res = await fetch(`/api/stocks/lookup?code=${encodeURIComponent(raw)}`);
         if (res.ok) {
           const d = await res.json();
-          setLookupResult({ name: d.name, ticker: d.ticker });
+          setResolvedTicker({ ticker: d.ticker, name: d.name });
+          setLookupState("found");
         } else {
-          setLookupResult(null);
+          setResolvedTicker(null);
+          setLookupState("error");
         }
-      } catch { setLookupResult(null); } finally { setLookupLoading(false); }
+      } catch { setResolvedTicker(null); setLookupState("error"); }
     }, 600);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticker]);
+  }, [tickerRaw]);
 
+  // ── Sell-date day OHLC (debounced) ───────────────────────────────────
+  useEffect(() => {
+    const ticker = resolvedTicker?.ticker ?? (market === "US" ? tickerRaw.trim().toUpperCase() : "");
+    if (!ticker || !sellDate) { setDayOHLC(null); return; }
+    if (dayTimer.current) clearTimeout(dayTimer.current);
+    setDayLoading(true);
+    setDayOHLC(null);
+    dayTimer.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/stock/day?ticker=${encodeURIComponent(ticker)}&market=${market}&date=${sellDate}`);
+        if (res.ok) { const d = await res.json(); setDayOHLC(d); }
+        else setDayOHLC(null);
+      } catch { setDayOHLC(null); }
+      setDayLoading(false);
+    }, 700);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedTicker, tickerRaw, market, sellDate]);
+
+  // ── Fetch stock maxHigh data ──────────────────────────────────────────
   const fetchStockData = useCallback(async (record: SaleRecord): Promise<Partial<SaleRecord>> => {
     const params = new URLSearchParams({ ticker: record.ticker, market: record.market, sellDate: record.sellDate });
     const res = await fetch(`/api/stock?${params}`);
-    if (!res.ok) {
-      const err = await res.json();
-      return { fetchError: err.error ?? "查詢失敗", fetchedAt: Date.now() };
-    }
+    if (!res.ok) { const e = await res.json(); return { fetchError: e.error ?? "查詢失敗", fetchedAt: Date.now() }; }
     const data = await res.json();
-    return {
-      maxHigh:     data.maxHigh,
-      maxHighDate: data.maxHighDate,
-      lastClose:   data.lastClose,
-      currency:    data.currency,
-      fetchError:  undefined,
-      fetchedAt:   Date.now(),
-    };
+    return { maxHigh: data.maxHigh, maxHighDate: data.maxHighDate, lastClose: data.lastClose, currency: data.currency, fetchError: undefined, fetchedAt: Date.now() };
   }, []);
 
   const refreshRecord = async (id: string) => {
@@ -121,53 +152,74 @@ export default function RecordsTab() {
     setLoadingId(null);
   };
 
+  // ── Expand record → fetch & show chart ───────────────────────────────
+  const toggleExpand = async (record: SaleRecord) => {
+    const id = record.id;
+    if (expandedId === id) { setExpandedId(null); return; }
+    setExpandedId(id);
+    if (chartCache[id]) return; // already loaded
+
+    setChartLoading(id);
+    try {
+      const mktLabel = record.market === "TW" ? "台股" : "美股";
+      const today = new Date().toISOString().split("T")[0];
+      const res = await fetch(`/api/research?codes=${encodeURIComponent(`${record.ticker}:${mktLabel}`)}&start=${record.sellDate}&end=${today}`);
+      if (res.ok) {
+        const data = await res.json();
+        const rows: ChartRow[] = data[record.ticker] ?? [];
+        setChartCache(prev => ({ ...prev, [id]: rows }));
+      }
+    } catch { /**/ }
+    setChartLoading(null);
+  };
+
+  // ── Submit form ───────────────────────────────────────────────────────
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const resolvedTicker = lookupResult?.ticker ?? ticker.trim().toUpperCase();
-    const resolvedName   = lookupResult?.name;
+    const finalTicker = resolvedTicker?.ticker ?? tickerRaw.trim().toUpperCase();
+    const finalName   = resolvedTicker?.name;
+    if (!finalTicker) return;
+
     const newRecord: SaleRecord = {
       id: Date.now().toString(),
-      ticker:    resolvedTicker,
-      stockName: resolvedName,
-      market,
-      sellDate,
+      ticker: finalTicker, stockName: finalName,
+      market, sellDate,
       sellPrice: parseFloat(sellPrice),
-      shares:    parseFloat(shares),
-      note:      note.trim() || undefined,
+      shares: parseFloat(shares),
+      note: note.trim() || undefined,
     };
-    const baseRecords = [...records, newRecord];
-    persistRecords(baseRecords);
+    const base = [...records, newRecord];
+    persistRecords(base);
     setShowForm(false);
-    setTicker(""); setSellPrice(""); setShares(""); setNote(""); setLookupResult(null);
+    setTickerRaw(""); setResolvedTicker(null); setLookupState("idle");
+    setSellPrice(""); setShares(""); setNote(""); setDayOHLC(null);
 
     setLoadingId(newRecord.id);
     const updated = await fetchStockData(newRecord);
-    persistRecords(baseRecords.map(r => r.id === newRecord.id ? { ...r, ...updated } : r));
+    persistRecords(base.map(r => r.id === newRecord.id ? { ...r, ...updated } : r));
     setLoadingId(null);
   };
 
   const deleteRecord = (id: string) => {
     if (!confirm("確定刪除這筆紀錄？")) return;
     persistRecords(records.filter(r => r.id !== id));
+    if (expandedId === id) setExpandedId(null);
   };
 
-  // Dashboard — all amounts converted to TWD
+  // ── Dashboard ─────────────────────────────────────────────────────────
   const fxRate = usdToTwd ?? 32.5;
-  const toTWD = (amount: number, currency: string) =>
-    currency === "TWD" ? amount : amount * fxRate;
-
+  const toTWD  = (amount: number, currency: string) => currency === "TWD" ? amount : amount * fxRate;
   const recordsWithData  = records.filter(r => r.maxHigh != null);
   const totalMissedTWD   = recordsWithData.reduce((sum, r) => {
-    const currency = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
-    const missed   = (r.maxHigh! - r.sellPrice) * r.shares;
-    return sum + (missed > 0 ? toTWD(missed, currency) : 0);
+    const cur = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
+    const missed = (r.maxHigh! - r.sellPrice) * r.shares;
+    return sum + (missed > 0 ? toTWD(missed, cur) : 0);
   }, 0);
   const biggestMiss = recordsWithData.reduce((best, r) => {
-    if (r.maxHigh == null) return best;
-    const pct = ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100;
+    const pct = ((r.maxHigh! - r.sellPrice) / r.sellPrice) * 100;
     return pct > best.pct ? { pct, record: r } : best;
   }, { pct: -Infinity, record: null as SaleRecord | null });
-  const hasUSDRecords = records.some(r => r.market === "US" && r.maxHigh != null);
+  const hasUSD = records.some(r => r.market === "US" && r.maxHigh != null);
 
   return (
     <div className="space-y-6">
@@ -175,259 +227,336 @@ export default function RecordsTab() {
       <div className="flex items-start gap-3 rounded-xl px-4 py-3 text-xs"
         style={{ background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.2)", color: "#a16207" }}>
         <span className="text-base mt-0.5">🔒</span>
-        <span style={{ color: "inherit" }}>
-          資料只儲存在您的瀏覽器本機（localStorage），不上傳任何伺服器。
-          同一個瀏覽器可查到上次紀錄，但換瀏覽器或清快取就不見了。
-        </span>
+        <span>資料只儲存在您的瀏覽器本機（localStorage），不上傳任何伺服器。同一個瀏覽器可查到上次紀錄，換瀏覽器或清快取就不見了。</span>
       </div>
 
       {/* Dashboard */}
       {records.length > 0 && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="rounded-2xl p-5" style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)" }}>
-              <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>總共少賺了（新台幣）</p>
-              <p className="text-3xl font-bold text-red-500">
-                {totalMissedTWD === 0 ? "—" : `NT$ ${fmt(totalMissedTWD, 0)}`}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="rounded-2xl p-5" style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)" }}>
+            <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>總共少賺了（新台幣）</p>
+            <p className="text-3xl font-bold text-red-500">
+              {totalMissedTWD === 0 ? "—" : `NT$ ${fmt(totalMissedTWD, 0)}`}
+            </p>
+            {hasUSD && usdToTwd && (
+              <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>
+                {fxFallback ? "⚠️ 匯率估算 32.5" : `1 USD = ${fmt(usdToTwd, 2)} TWD`}
+                {fxUpdated && !fxFallback ? `（${fxUpdated}）` : ""}
               </p>
-              {hasUSDRecords && usdToTwd && (
-                <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>
-                  {fxFallback ? "⚠️ 匯率估算" : `匯率 1 USD = ${fmt(usdToTwd, 2)} TWD`}
-                  {fxUpdated && !fxFallback ? `（${fxUpdated}）` : ""}
+            )}
+          </div>
+          <div className="rounded-2xl p-5" style={{ background: "rgba(249,115,22,0.07)", border: "1px solid rgba(249,115,22,0.2)" }}>
+            <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>最痛一筆</p>
+            {biggestMiss.record ? (
+              <>
+                <p className="text-3xl font-bold text-orange-500">+{fmt(biggestMiss.pct, 1)}%</p>
+                <p className="text-xs mt-1 font-mono" style={{ color: "var(--fg-subtle)" }}>
+                  {biggestMiss.record.stockName ?? biggestMiss.record.ticker} · {biggestMiss.record.market}
                 </p>
-              )}
-            </div>
-            <div className="rounded-2xl p-5" style={{ background: "rgba(249,115,22,0.07)", border: "1px solid rgba(249,115,22,0.2)" }}>
-              <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>最痛一筆</p>
-              {biggestMiss.record ? (
-                <>
-                  <p className="text-3xl font-bold text-orange-500">+{fmt(biggestMiss.pct, 1)}%</p>
-                  <p className="text-xs mt-1 font-mono" style={{ color: "var(--fg-subtle)" }}>
-                    {biggestMiss.record.stockName ?? biggestMiss.record.ticker} · {biggestMiss.record.market}
-                  </p>
-                </>
-              ) : <p className="text-3xl font-bold" style={{ color: "var(--fg-subtle)" }}>—</p>}
-            </div>
+              </>
+            ) : <p className="text-3xl font-bold" style={{ color: "var(--fg-subtle)" }}>—</p>}
           </div>
         </div>
       )}
 
-      {/* Header + Add button */}
+      {/* Header + Add */}
       <div className="flex justify-between items-center">
         <h2 className="font-semibold text-base" style={{ color: "var(--fg)" }}>
-          後悔藥紀錄 {records.length > 0 && <span className="text-sm font-normal" style={{ color: "var(--fg-subtle)" }}>({records.length} 筆)</span>}
+          後悔藥紀錄{records.length > 0 && <span className="text-sm font-normal ml-1.5" style={{ color: "var(--fg-subtle)" }}>({records.length} 筆)</span>}
         </h2>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
-        >
-          {showForm ? "✕ 取消" : "+ 新增"}
+        <button onClick={() => setShowForm(!showForm)}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">
+          {showForm ? <><X className="h-3.5 w-3.5" /> 取消</> : <><Plus className="h-3.5 w-3.5" /> 新增</>}
         </button>
       </div>
 
-      {/* Form */}
+      {/* ── Add Form ── */}
       {showForm && (
-        <form onSubmit={handleSubmit} className="rounded-2xl p-5 space-y-4 fade-in" style={cardStyle}>
-          <div className="grid grid-cols-2 gap-4">
-            {/* Stock input */}
-            <div className="col-span-2 sm:col-span-1">
-              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>
-                股票代號或名稱
-              </label>
-              <input
-                required
-                placeholder={market === "TW" ? "如 2330、台積電、0050" : "如 NVDA、AAPL、MSFT"}
-                value={ticker}
-                onChange={e => setTicker(e.target.value)}
-                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                style={inputStyle}
-              />
-              <div className="mt-1 h-4 text-xs">
-                {lookupLoading && <span style={{ color: "var(--fg-subtle)" }}>🔍 查詢中...</span>}
-                {!lookupLoading && lookupResult && (
-                  <span style={{ color: "#22c55e" }}>✓ {lookupResult.name} ({lookupResult.ticker})</span>
-                )}
-                {!lookupLoading && lookupError && <span className="text-red-500">{lookupError}</span>}
+        <form onSubmit={handleSubmit} className="rounded-2xl p-5 space-y-5 fade-in" style={cardStyle}>
+
+          {/* Step 1: Market */}
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide mb-2 block" style={{ color: "var(--fg-muted)" }}>
+              ① 選擇市場
+            </label>
+            <div className="flex gap-2">
+              {(["TW", "US"] as const).map(m => (
+                <button key={m} type="button"
+                  onClick={() => { setMarket(m); setTickerRaw(""); setResolvedTicker(null); setLookupState("idle"); setDayOHLC(null); }}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all cursor-pointer"
+                  style={market === m
+                    ? { background: "#4f46e5", borderColor: "#4f46e5", color: "#fff" }
+                    : { ...inputStyle, borderRadius: "0.75rem", padding: "0.625rem", width: "auto" }}>
+                  {m === "TW" ? "🇹🇼 台股（TWSE）" : "🇺🇸 美股（Yahoo）"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Step 2: Ticker input */}
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide mb-2 block" style={{ color: "var(--fg-muted)" }}>
+              ② 輸入股票
+            </label>
+
+            {/* TW: toggle ticker/name */}
+            {market === "TW" && (
+              <div className="flex gap-2 mb-2">
+                {(["ticker", "name"] as const).map(mode => (
+                  <button key={mode} type="button"
+                    onClick={() => { setTwInputMode(mode); setTickerRaw(""); setResolvedTicker(null); setLookupState("idle"); }}
+                    className="px-3 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer"
+                    style={twInputMode === mode
+                      ? { background: "var(--fg)", color: "var(--bg)", borderColor: "var(--fg)" }
+                      : { ...inputStyle, borderRadius: "0.5rem", padding: "0.25rem 0.75rem", width: "auto" }}>
+                    {mode === "ticker" ? "📌 輸入代號" : "🔍 輸入名稱"}
+                  </button>
+                ))}
               </div>
-            </div>
+            )}
 
-            {/* Market */}
-            <div className="col-span-2 sm:col-span-1">
-              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>市場</label>
-              <select
-                value={market}
-                onChange={e => { setMarket(e.target.value as "TW" | "US"); setLookupResult(null); setTicker(""); }}
-                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                style={{ ...inputStyle }}
-              >
-                <option value="TW">🇹🇼 台股 (TWSE)</option>
-                <option value="US">🇺🇸 美股 (Yahoo Finance)</option>
-              </select>
-              <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>
-                {market === "TW" ? "台股資料來源：證交所 TWSE" : "美股資料來源：Yahoo Finance"}
-              </p>
-            </div>
-          </div>
-
-          <div>
-            <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>賣出日期</label>
             <input
-              type="date"
-              required
-              value={sellDate}
-              max={new Date().toISOString().split("T")[0]}
-              onChange={e => setSellDate(e.target.value)}
-              className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              style={{ ...inputStyle, colorScheme: "auto" }}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>
-                賣出價格 ({market === "TW" ? "NT$" : "USD"})
-              </label>
-              <input
-                type="number" required min="0.01" step="0.01" placeholder="0.00"
-                value={sellPrice} onChange={e => setSellPrice(e.target.value)}
-                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>股數（張 × 1000 或股）</label>
-              <input
-                type="number" required min="1" step="1" placeholder="1000"
-                value={shares} onChange={e => setShares(e.target.value)}
-                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                style={inputStyle}
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>備註（選填）</label>
-            <input
-              placeholder="e.g. 以為要跌了所以賣掉..."
-              value={note} onChange={e => setNote(e.target.value)}
-              className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              required={market === "US" || twInputMode === "ticker"}
+              value={tickerRaw}
+              onChange={e => setTickerRaw(market === "US" ? e.target.value.toUpperCase() : e.target.value)}
+              placeholder={
+                market === "US" ? "美股代號，如 NVDA、AAPL、MSFT" :
+                twInputMode === "ticker" ? "台股代號，如 2330、0050、00878" :
+                "公司名稱，如 台積電、聯發科、鴻海"
+              }
               style={inputStyle}
             />
+
+            {/* Lookup result */}
+            <div className="mt-1.5 h-5 text-xs flex items-center gap-1.5">
+              {lookupState === "loading" && <span style={{ color: "var(--fg-subtle)" }}>🔍 查詢中...</span>}
+              {lookupState === "found"   && resolvedTicker && (
+                <span style={{ color: "#22c55e" }}>✓ {resolvedTicker.name} ({resolvedTicker.ticker})</span>
+              )}
+              {lookupState === "error"   && tickerRaw.trim() && (
+                <span className="text-red-500">找不到此股票，請確認代號或名稱</span>
+              )}
+            </div>
+          </div>
+
+          {/* Step 3: Date with OHLC */}
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide mb-2 block" style={{ color: "var(--fg-muted)" }}>
+              ③ 賣出日期
+            </label>
+            <input type="date" required value={sellDate}
+              max={new Date().toISOString().split("T")[0]}
+              onChange={e => setSellDate(e.target.value)}
+              style={{ ...inputStyle, colorScheme: "auto" }} />
+
+            {/* Day OHLC */}
+            {(dayLoading || dayOHLC) && (
+              <div className="mt-2 rounded-xl px-4 py-2.5 flex items-center gap-4"
+                style={{ background: "var(--bg-hover)", border: "1px solid var(--border)" }}>
+                {dayLoading ? (
+                  <span className="text-xs animate-pulse" style={{ color: "var(--fg-subtle)" }}>查詢當日行情...</span>
+                ) : dayOHLC && (
+                  <>
+                    <div className="text-xs">
+                      <span style={{ color: "var(--fg-subtle)" }}>當日最高 </span>
+                      <span className="font-semibold text-emerald-500">{fmt(dayOHLC.high)}</span>
+                    </div>
+                    <div className="text-xs">
+                      <span style={{ color: "var(--fg-subtle)" }}>最低 </span>
+                      <span className="font-semibold text-red-500">{fmt(dayOHLC.low)}</span>
+                    </div>
+                    {dayOHLC.close && (
+                      <div className="text-xs">
+                        <span style={{ color: "var(--fg-subtle)" }}>收盤 </span>
+                        <span className="font-semibold" style={{ color: "var(--fg)" }}>{fmt(dayOHLC.close)}</span>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Step 4: Price + shares */}
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide mb-2 block" style={{ color: "var(--fg-muted)" }}>
+              ④ 賣出條件
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs mb-1 block" style={{ color: "var(--fg-subtle)" }}>賣出均價 ({market === "TW" ? "NT$" : "USD"})</label>
+                <input type="number" required min="0.01" step="0.01" placeholder="0.00"
+                  value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <label className="text-xs mb-1 block" style={{ color: "var(--fg-subtle)" }}>股數</label>
+                <input type="number" required min="1" step="1" placeholder="1000"
+                  value={shares} onChange={e => setShares(e.target.value)} style={inputStyle} />
+              </div>
+            </div>
+          </div>
+
+          {/* Note */}
+          <div>
+            <input placeholder="備註（選填），如：以為要跌了所以賣..."
+              value={note} onChange={e => setNote(e.target.value)} style={inputStyle} />
           </div>
 
           <button type="submit"
-            className="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors cursor-pointer">
-            新增紀錄並查詢最高股價
+            className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold transition-colors cursor-pointer">
+            新增並查詢最高股價 →
           </button>
         </form>
       )}
 
-      {/* Records list */}
+      {/* ── Records List ── */}
       {records.length === 0 ? (
         <div className="text-center py-16" style={{ color: "var(--fg-subtle)" }}>
           <div className="text-4xl mb-3">📭</div>
-          <p className="text-sm">還沒有紀錄</p>
-          <p className="text-xs mt-1">點「新增」把你賣飛的股票加進來</p>
+          <p className="text-sm">還沒有紀錄，點「新增」開始記錄你賣飛的股票</p>
         </div>
       ) : (
         <div className="space-y-3">
           {records.map(r => {
-            const sellTotal = r.sellPrice * r.shares;
-            const isLoading = loadingId === r.id;
-            const currency  = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
-            let missedAmount: number | null = null;
-            let missedPct:    number | null = null;
-            if (r.maxHigh != null) {
-              missedAmount = (r.maxHigh - r.sellPrice) * r.shares;
-              missedPct    = ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100;
-            }
-            const isMissed = missedAmount != null && missedAmount > 0;
+            const isLoading  = loadingId === r.id;
+            const isExpanded = expandedId === r.id;
+            const currency   = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
+            const sellTotal  = r.sellPrice * r.shares;
+            const missedAmt  = r.maxHigh != null ? (r.maxHigh - r.sellPrice) * r.shares : null;
+            const missedPct  = r.maxHigh != null ? ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100 : null;
+            const isMissed   = missedAmt != null && missedAmt > 0;
+            const chartRows  = chartCache[r.id] ?? [];
+
+            // Find max high index in chart for ReferenceDot
+            const maxCloseRow = chartRows.reduce<ChartRow | null>(
+              (best, row) => (!best || row.close > best.close ? row : best), null
+            );
 
             return (
-              <div key={r.id} className="rounded-2xl p-4 space-y-3 transition-all hover:shadow-sm" style={cardStyle}>
-                {/* Top */}
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="rounded-lg px-2 py-0.5 text-xs font-bold font-mono"
-                      style={{ background: "var(--bg-hover)", color: "var(--fg)" }}>
-                      {r.ticker}
-                    </span>
-                    {r.stockName && (
-                      <span className="text-sm font-medium" style={{ color: "var(--fg)" }}>{r.stockName}</span>
-                    )}
-                    <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
-                      {r.market === "TW" ? "🇹🇼 台股" : "🇺🇸 美股"} · 賣出 {r.sellDate}
-                    </span>
+              <div key={r.id} className="rounded-2xl overflow-hidden transition-shadow" style={cardStyle}>
+                {/* Main row */}
+                <div className="p-4">
+                  {/* Top bar */}
+                  <div className="flex items-start justify-between gap-2 mb-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="rounded-lg px-2 py-0.5 text-xs font-bold font-mono"
+                        style={{ background: "var(--bg-hover)", color: "var(--fg)" }}>
+                        {r.ticker}
+                      </span>
+                      {r.stockName && <span className="text-sm font-medium" style={{ color: "var(--fg)" }}>{r.stockName}</span>}
+                      <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
+                        {r.market === "TW" ? "🇹🇼" : "🇺🇸"} 賣出 {r.sellDate}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button onClick={() => toggleExpand(r)} title="查看走勢圖"
+                        className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs border transition-colors cursor-pointer"
+                        style={{ ...inputStyle, padding: "0.25rem 0.5rem", width: "auto" }}>
+                        {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                        <span style={{ color: "var(--fg-muted)" }}>走勢</span>
+                      </button>
+                      <button onClick={() => refreshRecord(r.id)} disabled={isLoading} title="重新查詢"
+                        className="p-1.5 rounded-lg border transition-colors cursor-pointer disabled:opacity-40"
+                        style={{ ...inputStyle, padding: "0.375rem", width: "auto" }}>
+                        <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} style={{ color: "var(--fg-muted)" }} />
+                      </button>
+                      <button onClick={() => deleteRecord(r.id)} title="刪除"
+                        className="p-1.5 rounded-lg border transition-colors cursor-pointer hover:border-red-500/50"
+                        style={{ ...inputStyle, padding: "0.375rem", width: "auto" }}>
+                        <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button onClick={() => refreshRecord(r.id)} disabled={isLoading} title="重新查詢"
-                      className="text-xs transition-colors cursor-pointer disabled:opacity-50"
-                      style={{ color: "var(--fg-subtle)" }}>
-                      {isLoading ? "⏳" : "🔄"}
-                    </button>
-                    <button onClick={() => deleteRecord(r.id)} title="刪除"
-                      className="text-xs transition-colors cursor-pointer hover:text-red-500"
-                      style={{ color: "var(--fg-subtle)" }}>
-                      🗑️
-                    </button>
+
+                  {/* Stats grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>賣出均價</p>
+                      <p className="text-sm font-medium" style={{ color: "var(--fg)" }}>{fmtP(r.sellPrice, currency)}</p>
+                      <p className="text-xs" style={{ color: "var(--fg-subtle)" }}>{fmt(r.shares, 0)} 股 ＝ {fmtP(sellTotal, currency)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>賣出後最高價</p>
+                      {isLoading ? <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>查詢中...</p>
+                        : r.fetchError ? <p className="text-xs text-red-500">{r.fetchError}</p>
+                        : r.maxHigh != null ? <p className="text-sm font-medium text-yellow-500">{fmtP(r.maxHigh, currency)}</p>
+                        : <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>}
+                    </div>
+                    <div>
+                      <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>最高價日期</p>
+                      {isLoading ? <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>—</p>
+                        : r.maxHighDate ? <p className="text-sm font-medium" style={{ color: "var(--fg)" }}>{r.maxHighDate}</p>
+                        : <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>}
+                    </div>
+                    <div>
+                      <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>少賺了</p>
+                      {isLoading ? <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>—</p>
+                        : missedAmt != null ? (
+                          <>
+                            <p className={`text-sm font-bold ${isMissed ? "text-red-500" : "text-emerald-500"}`}>
+                              {isMissed ? "+" : ""}{fmtP(missedAmt, currency)}
+                            </p>
+                            <p className={`text-xs ${isMissed ? "text-red-400" : "text-emerald-400"}`}>
+                              {isMissed ? "+" : ""}{fmt(missedPct!, 1)}%
+                            </p>
+                          </>
+                        ) : <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>}
+                    </div>
                   </div>
+
+                  {r.note && (
+                    <p className="text-xs mt-3 border-t pt-2" style={{ color: "var(--fg-subtle)", borderColor: "var(--border-muted)" }}>
+                      💬 {r.note}
+                    </p>
+                  )}
                 </div>
 
-                {/* Stats grid */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div>
-                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>賣出均價</p>
-                    <p className="text-sm font-medium" style={{ color: "var(--fg)" }}>{fmtCurrency(r.sellPrice, currency)}</p>
-                    <p className="text-xs" style={{ color: "var(--fg-subtle)" }}>{fmt(r.shares, 0)} 股 = {fmtCurrency(sellTotal, currency)}</p>
-                  </div>
-
-                  <div>
-                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>賣出後最高價</p>
-                    {isLoading ? (
-                      <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>查詢中...</p>
-                    ) : r.fetchError ? (
-                      <p className="text-xs text-red-500">{r.fetchError}</p>
-                    ) : r.maxHigh != null ? (
-                      <p className="text-sm font-medium text-yellow-500">{fmtCurrency(r.maxHigh, currency)}</p>
+                {/* ── Expanded chart ── */}
+                {isExpanded && (
+                  <div className="border-t px-4 pb-4 pt-3" style={{ borderColor: "var(--border)" }}>
+                    <p className="text-xs font-medium mb-3" style={{ color: "var(--fg-muted)" }}>
+                      📈 {r.stockName ?? r.ticker} 走勢（{r.sellDate} ～ 今日）
+                    </p>
+                    {chartLoading === r.id ? (
+                      <div className="h-48 flex items-center justify-center" style={{ color: "var(--fg-subtle)" }}>
+                        <span className="text-sm animate-pulse">載入中...</span>
+                      </div>
+                    ) : chartRows.length === 0 ? (
+                      <div className="h-24 flex items-center justify-center" style={{ color: "var(--fg-subtle)" }}>
+                        <span className="text-sm">無法載入走勢資料</span>
+                      </div>
                     ) : (
-                      <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart data={chartRows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                          <XAxis dataKey="date" tick={{ fill: "var(--fg-subtle)", fontSize: 10 }} tickLine={false}
+                            axisLine={{ stroke: "var(--border)" }} interval="preserveStartEnd" tickFormatter={d => d.slice(5)} />
+                          <YAxis tick={{ fill: "var(--fg-subtle)", fontSize: 10 }} tickLine={false} axisLine={false}
+                            tickFormatter={v => `${v}`} width={52} domain={["auto", "auto"]} />
+                          <Tooltip
+                            contentStyle={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: "0.75rem", fontSize: 12 }}
+                            labelStyle={{ color: "var(--fg-muted)" }}
+                            itemStyle={{ color: "var(--fg)" }}
+                            formatter={(v) => [typeof v === "number" ? fmt(v) : v, "收盤價"]}
+                          />
+                          {/* Sell price reference */}
+                          <ReferenceLine y={r.sellPrice} stroke="#f87171" strokeDasharray="4 4"
+                            label={{ value: `賣出 ${fmt(r.sellPrice)}`, fill: "#f87171", fontSize: 10, position: "insideTopRight" }} />
+                          {/* Max high reference */}
+                          {r.maxHigh && (
+                            <ReferenceLine y={r.maxHigh} stroke="#fbbf24" strokeDasharray="4 4"
+                              label={{ value: `最高 ${fmt(r.maxHigh)}`, fill: "#fbbf24", fontSize: 10, position: "insideTopRight" }} />
+                          )}
+                          <Line type="monotone" dataKey="close" stroke="#818cf8" strokeWidth={2} dot={false} connectNulls />
+                          {/* Dot at max high date */}
+                          {r.maxHighDate && maxCloseRow && (
+                            <ReferenceDot x={r.maxHighDate} y={maxCloseRow.close}
+                              r={5} fill="#fbbf24" stroke="#fff" strokeWidth={2} />
+                          )}
+                        </LineChart>
+                      </ResponsiveContainer>
                     )}
                   </div>
-
-                  <div>
-                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>最高價日期</p>
-                    {isLoading ? (
-                      <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>—</p>
-                    ) : r.maxHighDate ? (
-                      <p className="text-sm font-medium" style={{ color: "var(--fg)" }}>{r.maxHighDate}</p>
-                    ) : (
-                      <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>
-                    )}
-                  </div>
-
-                  <div>
-                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>少賺了</p>
-                    {isLoading ? (
-                      <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>—</p>
-                    ) : missedAmount != null ? (
-                      <>
-                        <p className={`text-sm font-bold ${isMissed ? "text-red-500" : "text-emerald-500"}`}>
-                          {isMissed ? "+" : ""}{fmtCurrency(missedAmount, currency)}
-                        </p>
-                        <p className={`text-xs ${isMissed ? "text-red-400" : "text-emerald-400"}`}>
-                          {isMissed ? "+" : ""}{fmt(missedPct!, 1)}%
-                        </p>
-                      </>
-                    ) : (
-                      <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>
-                    )}
-                  </div>
-                </div>
-
-                {r.note && (
-                  <p className="text-xs border-t pt-2" style={{ color: "var(--fg-subtle)", borderColor: "var(--border-muted)" }}>
-                    💬 {r.note}
-                  </p>
                 )}
               </div>
             );
