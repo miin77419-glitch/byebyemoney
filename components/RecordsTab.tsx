@@ -17,6 +17,7 @@ interface SaleRecord {
   sellPrice: number;
   shares: number;
   includeToday: boolean;
+  useClose: boolean;   // true = compare closing price, false = compare daily high
   note?: string;
   maxHigh?: number | null;
   maxHighDate?: string | null;
@@ -97,6 +98,7 @@ function EditForm({ record, onSave, onCancel }: {
   const [shares,       setShares]       = useState(String(record.shares));
   const [sellDate,     setSellDate]     = useState(record.sellDate);
   const [includeToday, setIncludeToday] = useState(record.includeToday);
+  const [useClose,     setUseClose]     = useState(record.useClose ?? true);
   const [note,         setNote]         = useState(record.note ?? "");
 
   const handleSave = (e: React.FormEvent) => {
@@ -104,7 +106,7 @@ function EditForm({ record, onSave, onCancel }: {
     const sp = parseFloat(sellPrice);
     const sh = parseFloat(shares);
     if (isNaN(sp) || isNaN(sh) || sp <= 0 || sh <= 0) return;
-    onSave({ sellPrice: sp, shares: sh, sellDate, includeToday, note: note.trim() || undefined });
+    onSave({ sellPrice: sp, shares: sh, sellDate, includeToday, useClose, note: note.trim() || undefined });
   };
 
   return (
@@ -128,8 +130,15 @@ function EditForm({ record, onSave, onCancel }: {
           onChange={e => setSellDate(e.target.value)} style={{ ...inputStyle, colorScheme: "auto" }} />
       </div>
       <label className="flex items-center gap-2.5 cursor-pointer select-none">
+        <Toggle value={useClose} onChange={setUseClose} />
+        <span className="text-sm" style={{ color: "var(--fg)" }}>只計算收盤價</span>
+        <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
+          {useClose ? "比較收盤價" : "比較當日最高價"}
+        </span>
+      </label>
+      <label className="flex items-center gap-2.5 cursor-pointer select-none">
         <Toggle value={includeToday} onChange={setIncludeToday} />
-        <span className="text-sm" style={{ color: "var(--fg)" }}>計算當天最高價</span>
+        <span className="text-sm" style={{ color: "var(--fg)" }}>計算當天價格</span>
         <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
           {includeToday ? "含賣出當天" : "只算往後"}
         </span>
@@ -175,6 +184,7 @@ export default function RecordsTab() {
   const [lookupState,  setLookupState]  = useState<"idle" | "loading" | "found" | "error">("idle");
   const [sellDate,     setSellDate]     = useState(new Date().toISOString().split("T")[0]);
   const [includeToday, setIncludeToday] = useState(false);
+  const [useClose,     setUseClose]     = useState(true);   // default ON
   const [dayOHLC,      setDayOHLC]      = useState<DayOHLC | null>(null);
   const [dayOHLCError, setDayOHLCError] = useState<string | null>(null);
   const [dayLoading,   setDayLoading]   = useState(false);
@@ -233,6 +243,7 @@ export default function RecordsTab() {
     const params = new URLSearchParams({
       ticker: record.ticker, market: record.market,
       sellDate: record.sellDate, includeToday: String(record.includeToday),
+      useClose: String(record.useClose ?? true),
     });
     const res = await fetch(`/api/stock?${params}`);
     if (!res.ok) { const e = await res.json(); return { fetchError: e.error ?? "查詢失敗", fetchedAt: Date.now() }; }
@@ -302,7 +313,7 @@ export default function RecordsTab() {
     const newRecord: SaleRecord = {
       id: Date.now().toString(),
       ticker: finalTicker, stockName: resolved?.name,
-      market, sellDate, includeToday,
+      market, sellDate, includeToday, useClose,
       sellPrice: parseFloat(sellPrice), shares: parseFloat(shares),
       note: note.trim() || undefined,
     };
@@ -414,7 +425,8 @@ export default function RecordsTab() {
             </div>
             <div>
               <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>
-                {r.includeToday ? "含當日最高價" : "賣出後最高價"}
+                {(r.useClose ?? true) ? "最高收盤價" : "最高當日高點"}
+                {r.includeToday ? "（含當日）" : ""}
               </p>
               {isLoading ? <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>查詢中...</p>
                 : r.fetchError ? <p className="text-xs text-orange-500">{r.fetchError}</p>
@@ -490,7 +502,7 @@ export default function RecordsTab() {
                     label={{ value: `賣出 ${fmt(r.sellPrice)}`, fill: "#f87171", fontSize: 10, position: "insideTopRight" }} />
                   {r.maxHigh && (
                     <ReferenceLine y={r.maxHigh} stroke="#fbbf24" strokeDasharray="4 4"
-                      label={{ value: `最高 ${fmt(r.maxHigh)}`, fill: "#fbbf24", fontSize: 10, position: "insideTopRight" }} />
+                      label={{ value: `${(r.useClose ?? true) ? "最高收盤" : "最高"} ${fmt(r.maxHigh)}`, fill: "#fbbf24", fontSize: 10, position: "insideTopRight" }} />
                   )}
                   <Line type="monotone" dataKey="close" stroke="#818cf8" strokeWidth={2} dot={false} connectNulls />
                   {r.maxHighDate && maxCloseRow && (
@@ -607,13 +619,22 @@ export default function RecordsTab() {
             <input type="date" required value={sellDate} max={new Date().toISOString().split("T")[0]}
               onChange={e => setSellDate(e.target.value)} style={{ ...inputStyle, colorScheme: "auto" }} />
 
-            <label className="flex items-center gap-2.5 mt-3 cursor-pointer select-none">
-              <Toggle value={includeToday} onChange={setIncludeToday} />
-              <span className="text-sm" style={{ color: "var(--fg)" }}>計算當天最高價</span>
-              <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
-                {includeToday ? "含賣出當天" : "只算往後日期"}
-              </span>
-            </label>
+            <div className="mt-3 space-y-2">
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <Toggle value={useClose} onChange={setUseClose} />
+                <span className="text-sm" style={{ color: "var(--fg)" }}>只計算收盤價</span>
+                <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
+                  {useClose ? "以每日收盤價比較" : "以每日最高價比較"}
+                </span>
+              </label>
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <Toggle value={includeToday} onChange={setIncludeToday} />
+                <span className="text-sm" style={{ color: "var(--fg)" }}>計算當天價格</span>
+                <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
+                  {includeToday ? "含賣出當天" : "只算往後日期"}
+                </span>
+              </label>
+            </div>
 
             {(dayLoading || dayOHLC || dayOHLCError) && (
               <div className="mt-2 rounded-xl px-4 py-2.5" style={{ background: "var(--bg-hover)", border: "1px solid var(--border)" }}>
