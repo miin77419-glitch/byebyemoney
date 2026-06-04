@@ -1,25 +1,45 @@
 @import "tailwindcss";
 
+/* ── Light mode (default) ─────────────────────────────────────────────── */
 :root {
-  --background: #0a0a0f;
-  --foreground: #e8e8f0;
+  --bg:          #f4f4f8;
+  --bg-card:     #ffffff;
+  --bg-input:    #f0f0f5;
+  --bg-hover:    #e8e8f0;
+  --border:      #e2e2ec;
+  --border-muted:#ededf5;
+  --fg:          #111118;
+  --fg-muted:    #6b6b80;
+  --fg-subtle:   #9999b0;
+}
+
+/* ── Dark mode (system preference) ───────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:          #0a0a0f;
+    --bg-card:     #12121a;
+    --bg-input:    #1a1a28;
+    --bg-hover:    #1e1e2e;
+    --border:      rgba(255,255,255,0.08);
+    --border-muted:rgba(255,255,255,0.04);
+    --fg:          #e8e8f0;
+    --fg-muted:    #8888a8;
+    --fg-subtle:   #55556a;
+  }
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--bg);
+  color: var(--fg);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   min-height: 100vh;
 }
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-
-.fade-in {
-  animation: fadeIn 0.3s ease-out;
-}
+.fade-in { animation: fadeIn 0.3s ease-out; }
 
 .gradient-text {
   background: linear-gradient(135deg, #818cf8, #a78bfa);

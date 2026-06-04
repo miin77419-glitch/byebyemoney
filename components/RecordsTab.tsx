@@ -1,76 +1,87 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 interface SaleRecord {
   id: string;
   ticker: string;
+  stockName?: string;
   market: "TW" | "US";
   sellDate: string;
   sellPrice: number;
   shares: number;
   note?: string;
-  // fetched
   maxHigh?: number | null;
+  maxHighDate?: string | null;
   lastClose?: number | null;
   currency?: string;
-  shortName?: string;
   fetchedAt?: number;
   fetchError?: string;
 }
 
-const STORAGE_KEY = "byebyemoney_records";
+const STORAGE_KEY = "byebyemoney_records_v2";
 
 function loadRecords(): SaleRecord[] {
   if (typeof window === "undefined") return [];
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]"); } catch { return []; }
 }
-
-function saveRecords(records: SaleRecord[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
-}
+function saveRecords(r: SaleRecord[]) { localStorage.setItem(STORAGE_KEY, JSON.stringify(r)); }
 
 function fmt(n: number, decimals = 2) {
   return n.toLocaleString("zh-TW", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
-
 function fmtCurrency(n: number, currency: string) {
-  if (currency === "TWD") return `NT$ ${fmt(n, 0)}`;
-  return `$${fmt(n)}`;
+  return currency === "TWD" ? `NT$ ${fmt(n, 0)}` : `$${fmt(n)}`;
 }
 
+const cardStyle  = { background: "var(--bg-card)",  border: "1px solid var(--border)" };
+const inputStyle = { background: "var(--bg-input)", border: "1px solid var(--border)", color: "var(--fg)" };
+
 export default function RecordsTab() {
-  const [records, setRecords] = useState<SaleRecord[]>([]);
-  const [showForm, setShowForm] = useState(false);
+  const [records,   setRecords]   = useState<SaleRecord[]>([]);
+  const [showForm,  setShowForm]  = useState(false);
   const [loadingId, setLoadingId] = useState<string | null>(null);
-  const [form, setForm] = useState({
-    ticker: "",
-    market: "TW" as "TW" | "US",
-    sellDate: new Date().toISOString().split("T")[0],
-    sellPrice: "",
-    shares: "",
-    note: "",
-  });
 
+  // Form state
+  const [ticker,   setTicker]   = useState("");
+  const [market,   setMarket]   = useState<"TW" | "US">("TW");
+  const [sellDate, setSellDate] = useState(new Date().toISOString().split("T")[0]);
+  const [sellPrice, setSellPrice] = useState("");
+  const [shares,   setShares]   = useState("");
+  const [note,     setNote]     = useState("");
+
+  // Ticker lookup
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupResult,  setLookupResult]  = useState<{ name: string; ticker: string } | null>(null);
+  const [lookupError,   setLookupError]   = useState("");
+  const lookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => { setRecords(loadRecords()); }, []);
+
+  const persistRecords = (r: SaleRecord[]) => { setRecords(r); saveRecords(r); };
+
+  // Auto-lookup ticker/name as user types
   useEffect(() => {
-    setRecords(loadRecords());
-  }, []);
-
-  const persistRecords = (r: SaleRecord[]) => {
-    setRecords(r);
-    saveRecords(r);
-  };
+    if (!ticker.trim()) { setLookupResult(null); setLookupError(""); return; }
+    if (lookupTimer.current) clearTimeout(lookupTimer.current);
+    lookupTimer.current = setTimeout(async () => {
+      setLookupLoading(true);
+      setLookupError("");
+      try {
+        const res = await fetch(`/api/stocks/lookup?code=${encodeURIComponent(ticker.trim())}`);
+        if (res.ok) {
+          const d = await res.json();
+          setLookupResult({ name: d.name, ticker: d.ticker });
+        } else {
+          setLookupResult(null);
+        }
+      } catch { setLookupResult(null); } finally { setLookupLoading(false); }
+    }, 600);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker]);
 
   const fetchStockData = useCallback(async (record: SaleRecord): Promise<Partial<SaleRecord>> => {
-    const params = new URLSearchParams({
-      ticker: record.ticker,
-      market: record.market,
-      sellDate: record.sellDate,
-    });
+    const params = new URLSearchParams({ ticker: record.ticker, market: record.market, sellDate: record.sellDate });
     const res = await fetch(`/api/stock?${params}`);
     if (!res.ok) {
       const err = await res.json();
@@ -78,123 +89,107 @@ export default function RecordsTab() {
     }
     const data = await res.json();
     return {
-      maxHigh: data.maxHigh,
-      lastClose: data.lastClose,
-      currency: data.currency,
-      shortName: data.shortName,
-      fetchError: undefined,
-      fetchedAt: Date.now(),
+      maxHigh:     data.maxHigh,
+      maxHighDate: data.maxHighDate,
+      lastClose:   data.lastClose,
+      currency:    data.currency,
+      fetchError:  undefined,
+      fetchedAt:   Date.now(),
     };
   }, []);
 
   const refreshRecord = async (id: string) => {
-    const record = records.find((r) => r.id === id);
+    const record = records.find(r => r.id === id);
     if (!record) return;
     setLoadingId(id);
     const updated = await fetchStockData(record);
-    const newRecords = records.map((r) => (r.id === id ? { ...r, ...updated } : r));
-    persistRecords(newRecords);
+    persistRecords(records.map(r => r.id === id ? { ...r, ...updated } : r));
     setLoadingId(null);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const resolvedTicker = lookupResult?.ticker ?? ticker.trim().toUpperCase();
+    const resolvedName   = lookupResult?.name;
     const newRecord: SaleRecord = {
       id: Date.now().toString(),
-      ticker: form.ticker.trim().toUpperCase(),
-      market: form.market,
-      sellDate: form.sellDate,
-      sellPrice: parseFloat(form.sellPrice),
-      shares: parseFloat(form.shares),
-      note: form.note.trim() || undefined,
+      ticker:    resolvedTicker,
+      stockName: resolvedName,
+      market,
+      sellDate,
+      sellPrice: parseFloat(sellPrice),
+      shares:    parseFloat(shares),
+      note:      note.trim() || undefined,
     };
     const baseRecords = [...records, newRecord];
     persistRecords(baseRecords);
     setShowForm(false);
-    setForm({ ticker: "", market: "TW", sellDate: new Date().toISOString().split("T")[0], sellPrice: "", shares: "", note: "" });
+    setTicker(""); setSellPrice(""); setShares(""); setNote(""); setLookupResult(null);
 
-    // Auto-fetch
     setLoadingId(newRecord.id);
     const updated = await fetchStockData(newRecord);
-    const final = baseRecords.map((r) => (r.id === newRecord.id ? { ...r, ...updated } : r));
-    persistRecords(final);
+    persistRecords(baseRecords.map(r => r.id === newRecord.id ? { ...r, ...updated } : r));
     setLoadingId(null);
   };
 
   const deleteRecord = (id: string) => {
     if (!confirm("確定刪除這筆紀錄？")) return;
-    persistRecords(records.filter((r) => r.id !== id));
+    persistRecords(records.filter(r => r.id !== id));
   };
 
-  // Dashboard calculations
-  const recordsWithData = records.filter((r) => r.maxHigh != null);
-  const totalSellValue = records.reduce((sum, r) => sum + r.sellPrice * r.shares, 0);
+  // Dashboard
+  const recordsWithData  = records.filter(r => r.maxHigh != null);
+  const totalSellValue   = records.reduce((sum, r) => sum + r.sellPrice * r.shares, 0);
   const totalMissedValue = recordsWithData.reduce((sum, r) => {
     const missed = (r.maxHigh! - r.sellPrice) * r.shares;
     return sum + (missed > 0 ? missed : 0);
   }, 0);
-
-  const biggestMiss = recordsWithData.reduce(
-    (best, r) => {
-      if (r.maxHigh == null) return best;
-      const pct = ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100;
-      return pct > best.pct ? { pct, record: r } : best;
-    },
-    { pct: -Infinity, record: null as SaleRecord | null }
-  );
+  const biggestMiss = recordsWithData.reduce((best, r) => {
+    if (r.maxHigh == null) return best;
+    const pct = ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100;
+    return pct > best.pct ? { pct, record: r } : best;
+  }, { pct: -Infinity, record: null as SaleRecord | null });
 
   return (
     <div className="space-y-6">
       {/* Storage notice */}
-      <div className="flex items-start gap-3 rounded-xl px-4 py-3 border border-yellow-500/20 bg-yellow-500/5 text-yellow-300/80 text-xs">
+      <div className="flex items-start gap-3 rounded-xl px-4 py-3 text-xs"
+        style={{ background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.2)", color: "#a16207" }}>
         <span className="text-base mt-0.5">🔒</span>
-        <span>
-          資料只儲存在您的瀏覽器本機（localStorage），不上傳到任何伺服器，無個資隱憂。
-          同一個瀏覽器可查到上次的紀錄，但換瀏覽器或清快取就不見了。
+        <span style={{ color: "inherit" }}>
+          資料只儲存在您的瀏覽器本機（localStorage），不上傳任何伺服器。
+          同一個瀏覽器可查到上次紀錄，但換瀏覽器或清快取就不見了。
         </span>
       </div>
 
       {/* Dashboard */}
       {records.length > 0 && (
         <div className="grid grid-cols-2 gap-4">
-          <div
-            className="rounded-2xl p-5 border border-red-500/20"
-            style={{ background: "linear-gradient(135deg, rgba(239,68,68,0.1), rgba(220,38,38,0.05))" }}
-          >
-            <p className="text-gray-400 text-xs mb-1">總共少賺了</p>
-            <p className="text-3xl font-bold text-red-400">
+          <div className="rounded-2xl p-5" style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)" }}>
+            <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>總共少賺了</p>
+            <p className="text-3xl font-bold text-red-500">
               {totalMissedValue === 0 ? "—" : `+${fmt(totalMissedValue, 0)}`}
             </p>
-            <p className="text-gray-600 text-xs mt-1">
-              賣出總金額 {fmt(totalSellValue, 0)}
-            </p>
+            <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>賣出總金額 {fmt(totalSellValue, 0)}</p>
           </div>
-
-          <div
-            className="rounded-2xl p-5 border border-orange-500/20"
-            style={{ background: "linear-gradient(135deg, rgba(249,115,22,0.1), rgba(234,88,12,0.05))" }}
-          >
-            <p className="text-gray-400 text-xs mb-1">最痛一筆</p>
+          <div className="rounded-2xl p-5" style={{ background: "rgba(249,115,22,0.07)", border: "1px solid rgba(249,115,22,0.2)" }}>
+            <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>最痛一筆</p>
             {biggestMiss.record ? (
               <>
-                <p className="text-3xl font-bold text-orange-400">
-                  +{fmt(biggestMiss.pct, 1)}%
-                </p>
-                <p className="text-gray-500 text-xs mt-1 font-mono">
-                  {biggestMiss.record.ticker} · {biggestMiss.record.market}
+                <p className="text-3xl font-bold text-orange-500">+{fmt(biggestMiss.pct, 1)}%</p>
+                <p className="text-xs mt-1 font-mono" style={{ color: "var(--fg-subtle)" }}>
+                  {biggestMiss.record.stockName ?? biggestMiss.record.ticker} · {biggestMiss.record.market}
                 </p>
               </>
-            ) : (
-              <p className="text-3xl font-bold text-gray-600">—</p>
-            )}
+            ) : <p className="text-3xl font-bold" style={{ color: "var(--fg-subtle)" }}>—</p>}
           </div>
         </div>
       )}
 
-      {/* Add Button */}
+      {/* Header + Add button */}
       <div className="flex justify-between items-center">
-        <h2 className="text-white font-semibold text-base">
-          賣飛紀錄 {records.length > 0 && <span className="text-gray-500 text-sm font-normal">({records.length} 筆)</span>}
+        <h2 className="font-semibold text-base" style={{ color: "var(--fg)" }}>
+          後悔藥紀錄 {records.length > 0 && <span className="text-sm font-normal" style={{ color: "var(--fg-subtle)" }}>({records.length} 筆)</span>}
         </h2>
         <button
           onClick={() => setShowForm(!showForm)}
@@ -206,200 +201,205 @@ export default function RecordsTab() {
 
       {/* Form */}
       {showForm && (
-        <form
-          onSubmit={handleSubmit}
-          className="rounded-2xl p-5 border border-white/10 bg-white/5 space-y-4 fade-in"
-        >
+        <form onSubmit={handleSubmit} className="rounded-2xl p-5 space-y-4 fade-in" style={cardStyle}>
           <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-gray-400 text-xs mb-1.5 block">股票代號</label>
+            {/* Stock input */}
+            <div className="col-span-2 sm:col-span-1">
+              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>
+                股票代號或名稱
+              </label>
               <input
                 required
-                placeholder="如 2330 或 NVDA"
-                value={form.ticker}
-                onChange={(e) => setForm({ ...form, ticker: e.target.value })}
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+                placeholder={market === "TW" ? "如 2330、台積電、0050" : "如 NVDA、AAPL、MSFT"}
+                value={ticker}
+                onChange={e => setTicker(e.target.value)}
+                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                style={inputStyle}
               />
+              <div className="mt-1 h-4 text-xs">
+                {lookupLoading && <span style={{ color: "var(--fg-subtle)" }}>🔍 查詢中...</span>}
+                {!lookupLoading && lookupResult && (
+                  <span style={{ color: "#22c55e" }}>✓ {lookupResult.name} ({lookupResult.ticker})</span>
+                )}
+                {!lookupLoading && lookupError && <span className="text-red-500">{lookupError}</span>}
+              </div>
             </div>
-            <div>
-              <label className="text-gray-400 text-xs mb-1.5 block">市場</label>
+
+            {/* Market */}
+            <div className="col-span-2 sm:col-span-1">
+              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>市場</label>
               <select
-                value={form.market}
-                onChange={(e) => setForm({ ...form, market: e.target.value as "TW" | "US" })}
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500"
-                style={{ background: "#1a1a2e" }}
+                value={market}
+                onChange={e => { setMarket(e.target.value as "TW" | "US"); setLookupResult(null); setTicker(""); }}
+                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                style={{ ...inputStyle }}
               >
-                <option value="TW">🇹🇼 台股</option>
-                <option value="US">🇺🇸 美股</option>
+                <option value="TW">🇹🇼 台股 (TWSE)</option>
+                <option value="US">🇺🇸 美股 (Yahoo Finance)</option>
               </select>
+              <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>
+                {market === "TW" ? "台股資料來源：證交所 TWSE" : "美股資料來源：Yahoo Finance"}
+              </p>
             </div>
           </div>
 
           <div>
-            <label className="text-gray-400 text-xs mb-1.5 block">賣出日期</label>
+            <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>賣出日期</label>
             <input
               type="date"
               required
-              value={form.sellDate}
+              value={sellDate}
               max={new Date().toISOString().split("T")[0]}
-              onChange={(e) => setForm({ ...form, sellDate: e.target.value })}
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500"
-              style={{ colorScheme: "dark" }}
+              onChange={e => setSellDate(e.target.value)}
+              className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              style={{ ...inputStyle, colorScheme: "auto" }}
             />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="text-gray-400 text-xs mb-1.5 block">
-                賣出價格 ({form.market === "TW" ? "NT$" : "USD"})
+              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>
+                賣出價格 ({market === "TW" ? "NT$" : "USD"})
               </label>
               <input
-                type="number"
-                required
-                min="0.01"
-                step="0.01"
-                placeholder="0.00"
-                value={form.sellPrice}
-                onChange={(e) => setForm({ ...form, sellPrice: e.target.value })}
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+                type="number" required min="0.01" step="0.01" placeholder="0.00"
+                value={sellPrice} onChange={e => setSellPrice(e.target.value)}
+                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                style={inputStyle}
               />
             </div>
             <div>
-              <label className="text-gray-400 text-xs mb-1.5 block">股數</label>
+              <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>股數（張 × 1000 或股）</label>
               <input
-                type="number"
-                required
-                min="1"
-                step="1"
-                placeholder="1000"
-                value={form.shares}
-                onChange={(e) => setForm({ ...form, shares: e.target.value })}
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+                type="number" required min="1" step="1" placeholder="1000"
+                value={shares} onChange={e => setShares(e.target.value)}
+                className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                style={inputStyle}
               />
             </div>
           </div>
 
           <div>
-            <label className="text-gray-400 text-xs mb-1.5 block">備註（選填）</label>
+            <label className="text-xs mb-1.5 block" style={{ color: "var(--fg-muted)" }}>備註（選填）</label>
             <input
-              placeholder="e.g. 以為要跌了所以賣..."
-              value={form.note}
-              onChange={(e) => setForm({ ...form, note: e.target.value })}
-              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+              placeholder="e.g. 以為要跌了所以賣掉..."
+              value={note} onChange={e => setNote(e.target.value)}
+              className="w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              style={inputStyle}
             />
           </div>
 
-          <button
-            type="submit"
-            className="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors cursor-pointer"
-          >
-            新增紀錄並查詢股價
+          <button type="submit"
+            className="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors cursor-pointer">
+            新增紀錄並查詢最高股價
           </button>
         </form>
       )}
 
-      {/* Records List */}
+      {/* Records list */}
       {records.length === 0 ? (
-        <div className="text-center py-16 text-gray-600">
+        <div className="text-center py-16" style={{ color: "var(--fg-subtle)" }}>
           <div className="text-4xl mb-3">📭</div>
           <p className="text-sm">還沒有紀錄</p>
           <p className="text-xs mt-1">點「新增」把你賣飛的股票加進來</p>
         </div>
       ) : (
         <div className="space-y-3">
-          {records.map((r) => {
+          {records.map(r => {
             const sellTotal = r.sellPrice * r.shares;
             const isLoading = loadingId === r.id;
+            const currency  = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
             let missedAmount: number | null = null;
-            let missedPct: number | null = null;
+            let missedPct:    number | null = null;
             if (r.maxHigh != null) {
               missedAmount = (r.maxHigh - r.sellPrice) * r.shares;
-              missedPct = ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100;
+              missedPct    = ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100;
             }
-            const currency = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
             const isMissed = missedAmount != null && missedAmount > 0;
 
             return (
-              <div
-                key={r.id}
-                className="rounded-2xl p-4 border border-white/10 bg-white/3 space-y-3 hover:border-white/20 transition-colors"
-                style={{ background: "rgba(255,255,255,0.03)" }}
-              >
-                {/* Top Row */}
+              <div key={r.id} className="rounded-2xl p-4 space-y-3 transition-all hover:shadow-sm" style={cardStyle}>
+                {/* Top */}
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="rounded-lg px-2 py-0.5 text-xs font-bold bg-white/10 text-white font-mono">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="rounded-lg px-2 py-0.5 text-xs font-bold font-mono"
+                      style={{ background: "var(--bg-hover)", color: "var(--fg)" }}>
                       {r.ticker}
-                    </div>
-                    <span className="text-gray-500 text-xs">
-                      {r.market === "TW" ? "🇹🇼" : "🇺🇸"} · {r.sellDate}
                     </span>
-                    {r.shortName && (
-                      <span className="text-gray-600 text-xs truncate max-w-[120px]">{r.shortName}</span>
+                    {r.stockName && (
+                      <span className="text-sm font-medium" style={{ color: "var(--fg)" }}>{r.stockName}</span>
                     )}
+                    <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
+                      {r.market === "TW" ? "🇹🇼 台股" : "🇺🇸 美股"} · 賣出 {r.sellDate}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => refreshRecord(r.id)}
-                      disabled={isLoading}
-                      title="重新查詢股價"
-                      className="text-gray-500 hover:text-white text-xs transition-colors cursor-pointer disabled:opacity-50"
-                    >
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => refreshRecord(r.id)} disabled={isLoading} title="重新查詢"
+                      className="text-xs transition-colors cursor-pointer disabled:opacity-50"
+                      style={{ color: "var(--fg-subtle)" }}>
                       {isLoading ? "⏳" : "🔄"}
                     </button>
-                    <button
-                      onClick={() => deleteRecord(r.id)}
-                      title="刪除"
-                      className="text-gray-600 hover:text-red-400 text-xs transition-colors cursor-pointer"
-                    >
+                    <button onClick={() => deleteRecord(r.id)} title="刪除"
+                      className="text-xs transition-colors cursor-pointer hover:text-red-500"
+                      style={{ color: "var(--fg-subtle)" }}>
                       🗑️
                     </button>
                   </div>
                 </div>
 
-                {/* Stats */}
-                <div className="grid grid-cols-3 gap-3">
+                {/* Stats grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div>
-                    <p className="text-gray-500 text-xs mb-0.5">賣出均價 × 股數</p>
-                    <p className="text-white text-sm font-medium">{fmtCurrency(r.sellPrice, currency)}</p>
-                    <p className="text-gray-600 text-xs">{fmt(r.shares, 0)} 股 = {fmtCurrency(sellTotal, currency)}</p>
+                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>賣出均價</p>
+                    <p className="text-sm font-medium" style={{ color: "var(--fg)" }}>{fmtCurrency(r.sellPrice, currency)}</p>
+                    <p className="text-xs" style={{ color: "var(--fg-subtle)" }}>{fmt(r.shares, 0)} 股 = {fmtCurrency(sellTotal, currency)}</p>
                   </div>
 
                   <div>
-                    <p className="text-gray-500 text-xs mb-0.5">賣出後最高價</p>
+                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>賣出後最高價</p>
                     {isLoading ? (
-                      <p className="text-gray-500 text-sm animate-pulse">查詢中...</p>
+                      <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>查詢中...</p>
                     ) : r.fetchError ? (
-                      <p className="text-red-400 text-xs">{r.fetchError}</p>
+                      <p className="text-xs text-red-500">{r.fetchError}</p>
                     ) : r.maxHigh != null ? (
-                      <p className="text-yellow-300 text-sm font-medium">{fmtCurrency(r.maxHigh, currency)}</p>
+                      <p className="text-sm font-medium text-yellow-500">{fmtCurrency(r.maxHigh, currency)}</p>
                     ) : (
-                      <p className="text-gray-600 text-sm">—</p>
+                      <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>
                     )}
                   </div>
 
                   <div>
-                    <p className="text-gray-500 text-xs mb-0.5">少賺了</p>
+                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>最高價日期</p>
                     {isLoading ? (
-                      <p className="text-gray-500 text-sm animate-pulse">—</p>
+                      <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>—</p>
+                    ) : r.maxHighDate ? (
+                      <p className="text-sm font-medium" style={{ color: "var(--fg)" }}>{r.maxHighDate}</p>
+                    ) : (
+                      <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>少賺了</p>
+                    {isLoading ? (
+                      <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>—</p>
                     ) : missedAmount != null ? (
                       <>
-                        <p className={`text-sm font-bold ${isMissed ? "text-red-400" : "text-emerald-400"}`}>
+                        <p className={`text-sm font-bold ${isMissed ? "text-red-500" : "text-emerald-500"}`}>
                           {isMissed ? "+" : ""}{fmtCurrency(missedAmount, currency)}
                         </p>
-                        <p className={`text-xs ${isMissed ? "text-red-500" : "text-emerald-500"}`}>
+                        <p className={`text-xs ${isMissed ? "text-red-400" : "text-emerald-400"}`}>
                           {isMissed ? "+" : ""}{fmt(missedPct!, 1)}%
                         </p>
                       </>
                     ) : (
-                      <p className="text-gray-600 text-sm">—</p>
+                      <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>
                     )}
                   </div>
                 </div>
 
-                {/* Note */}
                 {r.note && (
-                  <p className="text-gray-500 text-xs border-t border-white/5 pt-2">
+                  <p className="text-xs border-t pt-2" style={{ color: "var(--fg-subtle)", borderColor: "var(--border-muted)" }}>
                     💬 {r.note}
                   </p>
                 )}
