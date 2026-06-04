@@ -41,6 +41,9 @@ export default function RecordsTab() {
   const [records,   setRecords]   = useState<SaleRecord[]>([]);
   const [showForm,  setShowForm]  = useState(false);
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [usdToTwd,  setUsdToTwd]  = useState<number | null>(null);
+  const [fxUpdated, setFxUpdated] = useState<string | null>(null);
+  const [fxFallback, setFxFallback] = useState(false);
 
   // Form state
   const [ticker,   setTicker]   = useState("");
@@ -56,7 +59,18 @@ export default function RecordsTab() {
   const [lookupError,   setLookupError]   = useState("");
   const lookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => { setRecords(loadRecords()); }, []);
+  useEffect(() => {
+    setRecords(loadRecords());
+    // fetch USD→TWD rate
+    fetch("/api/fx").then(r => r.json()).then(d => {
+      setUsdToTwd(d.rate);
+      setFxFallback(!!d.fallback);
+      if (d.updatedAt) {
+        // format: "Thu, 05 Jun 2026 00:02:31 +0000" → just date
+        try { setFxUpdated(new Date(d.updatedAt).toLocaleDateString("zh-TW")); } catch { setFxUpdated(null); }
+      }
+    }).catch(() => { setUsdToTwd(32.5); setFxFallback(true); });
+  }, []);
 
   const persistRecords = (r: SaleRecord[]) => { setRecords(r); saveRecords(r); };
 
@@ -137,18 +151,23 @@ export default function RecordsTab() {
     persistRecords(records.filter(r => r.id !== id));
   };
 
-  // Dashboard
+  // Dashboard — all amounts converted to TWD
+  const fxRate = usdToTwd ?? 32.5;
+  const toTWD = (amount: number, currency: string) =>
+    currency === "TWD" ? amount : amount * fxRate;
+
   const recordsWithData  = records.filter(r => r.maxHigh != null);
-  const totalSellValue   = records.reduce((sum, r) => sum + r.sellPrice * r.shares, 0);
-  const totalMissedValue = recordsWithData.reduce((sum, r) => {
-    const missed = (r.maxHigh! - r.sellPrice) * r.shares;
-    return sum + (missed > 0 ? missed : 0);
+  const totalMissedTWD   = recordsWithData.reduce((sum, r) => {
+    const currency = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
+    const missed   = (r.maxHigh! - r.sellPrice) * r.shares;
+    return sum + (missed > 0 ? toTWD(missed, currency) : 0);
   }, 0);
   const biggestMiss = recordsWithData.reduce((best, r) => {
     if (r.maxHigh == null) return best;
     const pct = ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100;
     return pct > best.pct ? { pct, record: r } : best;
   }, { pct: -Infinity, record: null as SaleRecord | null });
+  const hasUSDRecords = records.some(r => r.market === "US" && r.maxHigh != null);
 
   return (
     <div className="space-y-6">
@@ -164,24 +183,31 @@ export default function RecordsTab() {
 
       {/* Dashboard */}
       {records.length > 0 && (
-        <div className="grid grid-cols-2 gap-4">
-          <div className="rounded-2xl p-5" style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)" }}>
-            <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>總共少賺了</p>
-            <p className="text-3xl font-bold text-red-500">
-              {totalMissedValue === 0 ? "—" : `+${fmt(totalMissedValue, 0)}`}
-            </p>
-            <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>賣出總金額 {fmt(totalSellValue, 0)}</p>
-          </div>
-          <div className="rounded-2xl p-5" style={{ background: "rgba(249,115,22,0.07)", border: "1px solid rgba(249,115,22,0.2)" }}>
-            <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>最痛一筆</p>
-            {biggestMiss.record ? (
-              <>
-                <p className="text-3xl font-bold text-orange-500">+{fmt(biggestMiss.pct, 1)}%</p>
-                <p className="text-xs mt-1 font-mono" style={{ color: "var(--fg-subtle)" }}>
-                  {biggestMiss.record.stockName ?? biggestMiss.record.ticker} · {biggestMiss.record.market}
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="rounded-2xl p-5" style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)" }}>
+              <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>總共少賺了（新台幣）</p>
+              <p className="text-3xl font-bold text-red-500">
+                {totalMissedTWD === 0 ? "—" : `NT$ ${fmt(totalMissedTWD, 0)}`}
+              </p>
+              {hasUSDRecords && usdToTwd && (
+                <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>
+                  {fxFallback ? "⚠️ 匯率估算" : `匯率 1 USD = ${fmt(usdToTwd, 2)} TWD`}
+                  {fxUpdated && !fxFallback ? `（${fxUpdated}）` : ""}
                 </p>
-              </>
-            ) : <p className="text-3xl font-bold" style={{ color: "var(--fg-subtle)" }}>—</p>}
+              )}
+            </div>
+            <div className="rounded-2xl p-5" style={{ background: "rgba(249,115,22,0.07)", border: "1px solid rgba(249,115,22,0.2)" }}>
+              <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>最痛一筆</p>
+              {biggestMiss.record ? (
+                <>
+                  <p className="text-3xl font-bold text-orange-500">+{fmt(biggestMiss.pct, 1)}%</p>
+                  <p className="text-xs mt-1 font-mono" style={{ color: "var(--fg-subtle)" }}>
+                    {biggestMiss.record.stockName ?? biggestMiss.record.ticker} · {biggestMiss.record.market}
+                  </p>
+                </>
+              ) : <p className="text-3xl font-bold" style={{ color: "var(--fg-subtle)" }}>—</p>}
+            </div>
           </div>
         </div>
       )}
