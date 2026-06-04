@@ -5,7 +5,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceDot,
 } from "recharts";
-import { ChevronDown, ChevronUp, RefreshCw, Trash2, Plus, X, AlertCircle, ShieldCheck } from "lucide-react";
+import { ChevronDown, ChevronUp, RefreshCw, Trash2, Plus, X, AlertCircle, ShieldCheck, Pencil } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 interface SaleRecord {
@@ -41,8 +41,9 @@ function saveRecords(r: SaleRecord[]) { localStorage.setItem(STORAGE_KEY, JSON.s
 function fmt(n: number, d = 2) {
   return n.toLocaleString("zh-TW", { minimumFractionDigits: d, maximumFractionDigits: d });
 }
+// Show price with 2 decimal places for both TWD and USD
 function fmtP(n: number, currency: string) {
-  return currency === "TWD" ? `NT$ ${fmt(n, 0)}` : `$${fmt(n)}`;
+  return currency === "TWD" ? `NT$ ${fmt(n, 2)}` : `$${fmt(n, 2)}`;
 }
 
 const cardStyle:  React.CSSProperties = { background: "var(--bg-card)",  border: "1px solid var(--border)" };
@@ -51,22 +52,27 @@ const inputStyle: React.CSSProperties = {
   borderRadius: "0.5rem", padding: "0.5rem 0.75rem", fontSize: "0.875rem",
   width: "100%", outline: "none",
 };
+const labelStyle: React.CSSProperties = { color: "var(--fg-subtle)", fontSize: "0.75rem", marginBottom: "0.25rem", display: "block" };
 
-// ── Section component ─────────────────────────────────────────────────────
-function Section({
-  title, icon, count, accentColor, children, defaultOpen = true,
-}: {
-  title: string; icon: React.ReactNode; count: number;
-  accentColor: string; children: React.ReactNode; defaultOpen?: boolean;
-}) {
+// ── Toggle switch ─────────────────────────────────────────────────────────
+function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div onClick={() => onChange(!value)} className="relative w-9 h-5 rounded-full transition-colors cursor-pointer shrink-0"
+      style={{ background: value ? "#4f46e5" : "var(--bg-hover)", border: "1px solid var(--border)" }}>
+      <div className="absolute top-0.5 rounded-full w-4 h-4 bg-white shadow transition-all"
+        style={{ left: value ? "calc(100% - 1.125rem)" : "0.125rem" }} />
+    </div>
+  );
+}
+
+// ── Section ───────────────────────────────────────────────────────────────
+function Section({ title, icon, count, accentColor, children, defaultOpen = true }:
+  { title: string; icon: React.ReactNode; count: number; accentColor: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="rounded-2xl overflow-hidden" style={cardStyle}>
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between px-5 py-4 cursor-pointer"
-        style={{ borderBottom: open ? "1px solid var(--border)" : "none" }}
-      >
+      <button onClick={() => setOpen(v => !v)} className="w-full flex items-center justify-between px-5 py-4 cursor-pointer"
+        style={{ borderBottom: open ? "1px solid var(--border)" : "none" }}>
         <div className="flex items-center gap-2.5">
           {icon}
           <span className="font-semibold text-sm" style={{ color: "var(--fg)" }}>{title}</span>
@@ -81,21 +87,87 @@ function Section({
   );
 }
 
+// ── Inline Edit Form ──────────────────────────────────────────────────────
+function EditForm({ record, onSave, onCancel }: {
+  record: SaleRecord;
+  onSave: (updated: Partial<SaleRecord>) => void;
+  onCancel: () => void;
+}) {
+  const [sellPrice,    setSellPrice]    = useState(String(record.sellPrice));
+  const [shares,       setShares]       = useState(String(record.shares));
+  const [sellDate,     setSellDate]     = useState(record.sellDate);
+  const [includeToday, setIncludeToday] = useState(record.includeToday);
+  const [note,         setNote]         = useState(record.note ?? "");
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    const sp = parseFloat(sellPrice);
+    const sh = parseFloat(shares);
+    if (isNaN(sp) || isNaN(sh) || sp <= 0 || sh <= 0) return;
+    onSave({ sellPrice: sp, shares: sh, sellDate, includeToday, note: note.trim() || undefined });
+  };
+
+  return (
+    <form onSubmit={handleSave} className="px-4 py-4 space-y-3 border-t" style={{ borderColor: "var(--border)", background: "var(--bg-hover)" }}>
+      <p className="text-xs font-semibold" style={{ color: "var(--fg-muted)" }}>✏️ 編輯紀錄</p>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label style={labelStyle}>賣出均價</label>
+          <input type="number" required min="0.0001" step="any" value={sellPrice}
+            onChange={e => setSellPrice(e.target.value)} style={inputStyle} />
+        </div>
+        <div>
+          <label style={labelStyle}>股數</label>
+          <input type="number" required min="0.0001" step="any" value={shares}
+            onChange={e => setShares(e.target.value)} style={inputStyle} />
+        </div>
+      </div>
+      <div>
+        <label style={labelStyle}>賣出日期</label>
+        <input type="date" required value={sellDate} max={new Date().toISOString().split("T")[0]}
+          onChange={e => setSellDate(e.target.value)} style={{ ...inputStyle, colorScheme: "auto" }} />
+      </div>
+      <label className="flex items-center gap-2.5 cursor-pointer select-none">
+        <Toggle value={includeToday} onChange={setIncludeToday} />
+        <span className="text-sm" style={{ color: "var(--fg)" }}>計算當天最高價</span>
+        <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
+          {includeToday ? "含賣出當天" : "只算往後"}
+        </span>
+      </label>
+      <div>
+        <label style={labelStyle}>備註</label>
+        <input placeholder="備註（選填）" value={note} onChange={e => setNote(e.target.value)} style={inputStyle} />
+      </div>
+      <div className="flex gap-2 pt-1">
+        <button type="submit"
+          className="flex-1 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors cursor-pointer">
+          儲存並重新查詢
+        </button>
+        <button type="button" onClick={onCancel}
+          className="px-4 py-2 rounded-xl text-xs font-medium transition-colors cursor-pointer"
+          style={{ ...inputStyle, width: "auto" }}>
+          取消
+        </button>
+      </div>
+    </form>
+  );
+}
+
 // ── Main Component ────────────────────────────────────────────────────────
 export default function RecordsTab() {
-  const [records,    setRecords]    = useState<SaleRecord[]>([]);
-  const [showForm,   setShowForm]   = useState(false);
-  const [loadingId,  setLoadingId]  = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [chartCache, setChartCache] = useState<Record<string, ChartRow[]>>({});
+  const [records,     setRecords]     = useState<SaleRecord[]>([]);
+  const [showForm,    setShowForm]    = useState(false);
+  const [loadingId,   setLoadingId]   = useState<string | null>(null);
+  const [expandedId,  setExpandedId]  = useState<string | null>(null);
+  const [editingId,   setEditingId]   = useState<string | null>(null);
+  const [chartCache,  setChartCache]  = useState<Record<string, ChartRow[]>>({});
   const [chartLoading, setChartLoading] = useState<string | null>(null);
 
-  // FX
   const [usdToTwd,   setUsdToTwd]   = useState<number | null>(null);
   const [fxUpdated,  setFxUpdated]  = useState<string | null>(null);
   const [fxFallback, setFxFallback] = useState(false);
 
-  // Form
+  // Form state
   const [market,       setMarket]       = useState<"TW" | "US">("TW");
   const [twInputMode,  setTwInputMode]  = useState<"ticker" | "name">("ticker");
   const [tickerRaw,    setTickerRaw]    = useState("");
@@ -104,6 +176,7 @@ export default function RecordsTab() {
   const [sellDate,     setSellDate]     = useState(new Date().toISOString().split("T")[0]);
   const [includeToday, setIncludeToday] = useState(false);
   const [dayOHLC,      setDayOHLC]      = useState<DayOHLC | null>(null);
+  const [dayOHLCError, setDayOHLCError] = useState<string | null>(null);
   const [dayLoading,   setDayLoading]   = useState(false);
   const [sellPrice,    setSellPrice]    = useState("");
   const [shares,       setShares]       = useState("");
@@ -115,15 +188,14 @@ export default function RecordsTab() {
   useEffect(() => {
     setRecords(loadRecords());
     fetch("/api/fx").then(r => r.json()).then(d => {
-      setUsdToTwd(d.rate);
-      setFxFallback(!!d.fallback);
+      setUsdToTwd(d.rate); setFxFallback(!!d.fallback);
       if (d.updatedAt) try { setFxUpdated(new Date(d.updatedAt).toLocaleDateString("zh-TW")); } catch { /**/ }
     }).catch(() => { setUsdToTwd(32.5); setFxFallback(true); });
   }, []);
 
   const persistRecords = (r: SaleRecord[]) => { setRecords(r); saveRecords(r); };
 
-  // Ticker / name lookup
+  // Ticker/name lookup
   useEffect(() => {
     const raw = tickerRaw.trim();
     if (!raw) { setResolved(null); setLookupState("idle"); return; }
@@ -139,24 +211,24 @@ export default function RecordsTab() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tickerRaw]);
 
-  // Sell-date OHLC
+  // Day OHLC fetch
   useEffect(() => {
     const ticker = resolved?.ticker ?? (market === "US" ? tickerRaw.trim().toUpperCase() : "");
-    if (!ticker || !sellDate) { setDayOHLC(null); return; }
+    if (!ticker || !sellDate) { setDayOHLC(null); setDayOHLCError(null); return; }
     if (dayTimer.current) clearTimeout(dayTimer.current);
-    setDayLoading(true);
-    setDayOHLC(null);
+    setDayLoading(true); setDayOHLC(null); setDayOHLCError(null);
     dayTimer.current = setTimeout(async () => {
       try {
         const res = await fetch(`/api/stock/day?ticker=${encodeURIComponent(ticker)}&market=${market}&date=${sellDate}`);
-        if (res.ok) setDayOHLC(await res.json()); else setDayOHLC(null);
-      } catch { setDayOHLC(null); }
+        if (res.ok) { setDayOHLC(await res.json()); setDayOHLCError(null); }
+        else { const e = await res.json(); setDayOHLCError(e.error ?? "無法取得當日行情"); setDayOHLC(null); }
+      } catch { setDayOHLCError("查詢失敗"); setDayOHLC(null); }
       setDayLoading(false);
     }, 700);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolved, tickerRaw, market, sellDate]);
 
-  // Fetch maxHigh
+  // Fetch maxHigh data
   const fetchStockData = useCallback(async (record: SaleRecord): Promise<Partial<SaleRecord>> => {
     const params = new URLSearchParams({
       ticker: record.ticker, market: record.market,
@@ -165,7 +237,15 @@ export default function RecordsTab() {
     const res = await fetch(`/api/stock?${params}`);
     if (!res.ok) { const e = await res.json(); return { fetchError: e.error ?? "查詢失敗", fetchedAt: Date.now() }; }
     const data = await res.json();
-    return { maxHigh: data.maxHigh, maxHighDate: data.maxHighDate, lastClose: data.lastClose, currency: data.currency, fetchError: undefined, fetchedAt: Date.now() };
+    // API can return fetchError in 200 response for unsupported stocks
+    return {
+      maxHigh:     data.maxHigh,
+      maxHighDate: data.maxHighDate,
+      lastClose:   data.lastClose,
+      currency:    data.currency,
+      fetchError:  data.fetchError ?? undefined,
+      fetchedAt:   Date.now(),
+    };
   }, []);
 
   const refreshRecord = async (id: string) => {
@@ -174,6 +254,22 @@ export default function RecordsTab() {
     setLoadingId(id);
     const updated = await fetchStockData(record);
     persistRecords(records.map(r => r.id === id ? { ...r, ...updated } : r));
+    setLoadingId(null);
+  };
+
+  // Save edit
+  const saveEdit = async (id: string, changes: Partial<SaleRecord>) => {
+    const record = records.find(r => r.id === id);
+    if (!record) return;
+    const updated = { ...record, ...changes, maxHigh: undefined, maxHighDate: undefined, lastClose: undefined, fetchError: undefined };
+    persistRecords(records.map(r => r.id === id ? updated : r));
+    setEditingId(null);
+    // Clear chart cache for this record
+    setChartCache(prev => { const n = { ...prev }; delete n[id]; return n; });
+    // Refetch
+    setLoadingId(id);
+    const fetched = await fetchStockData(updated);
+    persistRecords(records.map(r => r.id === id ? { ...updated, ...fetched } : r));
     setLoadingId(null);
   };
 
@@ -198,18 +294,16 @@ export default function RecordsTab() {
     setChartLoading(null);
   };
 
-  // Submit
+  // Submit new record
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const finalTicker = resolved?.ticker ?? tickerRaw.trim().toUpperCase();
-    const finalName   = resolved?.name;
     if (!finalTicker) return;
     const newRecord: SaleRecord = {
       id: Date.now().toString(),
-      ticker: finalTicker, stockName: finalName,
+      ticker: finalTicker, stockName: resolved?.name,
       market, sellDate, includeToday,
-      sellPrice: parseFloat(sellPrice),
-      shares:    parseFloat(shares),
+      sellPrice: parseFloat(sellPrice), shares: parseFloat(shares),
       note: note.trim() || undefined,
     };
     const base = [...records, newRecord];
@@ -217,7 +311,6 @@ export default function RecordsTab() {
     setShowForm(false);
     setTickerRaw(""); setResolved(null); setLookupState("idle");
     setSellPrice(""); setShares(""); setNote(""); setDayOHLC(null);
-
     setLoadingId(newRecord.id);
     const updated = await fetchStockData(newRecord);
     persistRecords(base.map(r => r.id === newRecord.id ? { ...r, ...updated } : r));
@@ -228,14 +321,15 @@ export default function RecordsTab() {
     if (!confirm("確定刪除這筆紀錄？")) return;
     persistRecords(records.filter(r => r.id !== id));
     if (expandedId === id) setExpandedId(null);
+    if (editingId === id) setEditingId(null);
   };
 
   // ── Dashboard ─────────────────────────────────────────────────────────
   const fxRate = usdToTwd ?? 32.5;
   const toTWD  = (amount: number, currency: string) => currency === "TWD" ? amount : amount * fxRate;
 
-  const regretRecords = records.filter(r => r.maxHigh != null && r.maxHigh > r.sellPrice);
-  const dodgedRecords = records.filter(r => r.maxHigh != null && r.maxHigh <= r.sellPrice);
+  const regretRecords  = records.filter(r => r.maxHigh != null && r.maxHigh > r.sellPrice);
+  const dodgedRecords  = records.filter(r => r.maxHigh != null && r.maxHigh <= r.sellPrice);
   const pendingRecords = records.filter(r => r.maxHigh == null && !r.fetchError);
   const errorRecords   = records.filter(r => !!r.fetchError);
 
@@ -253,22 +347,23 @@ export default function RecordsTab() {
   const RecordCard = ({ r, isRegret }: { r: SaleRecord; isRegret: boolean }) => {
     const isLoading  = loadingId === r.id;
     const isExpanded = expandedId === r.id;
+    const isEditing  = editingId === r.id;
     const currency   = r.currency ?? (r.market === "TW" ? "TWD" : "USD");
     const sellTotal  = r.sellPrice * r.shares;
-    const missedAmt  = r.maxHigh != null ? (r.maxHigh - r.sellPrice) * r.shares : null;
-    const missedPct  = r.maxHigh != null ? ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100 : null;
+    const rawMissed  = r.maxHigh != null ? (r.maxHigh - r.sellPrice) * r.shares : null;
+    const rawPct     = r.maxHigh != null ? ((r.maxHigh - r.sellPrice) / r.sellPrice) * 100 : null;
+    const displayAmt = rawMissed != null ? Math.abs(rawMissed) : null;
+    const displayPct = rawPct    != null ? Math.abs(rawPct)    : null;
+    const amountColor = isRegret ? "#ef4444" : "#22c55e";
     const chartRows  = chartCache[r.id] ?? [];
     const maxCloseRow = chartRows.reduce<ChartRow | null>(
       (best, row) => (!best || row.close > best.close ? row : best), null
     );
-    const amountColor = isRegret ? "#ef4444" : "#22c55e";
-    const displayAmt  = missedAmt != null ? Math.abs(missedAmt) : null;
-    const displayPct  = missedPct != null ? Math.abs(missedPct) : null;
 
     return (
       <div>
         <div className="p-4">
-          {/* Top bar */}
+          {/* Header */}
           <div className="flex items-start justify-between gap-2 mb-3">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="rounded-lg px-2 py-0.5 text-xs font-bold font-mono"
@@ -276,21 +371,32 @@ export default function RecordsTab() {
               {r.stockName && <span className="text-sm font-medium" style={{ color: "var(--fg)" }}>{r.stockName}</span>}
               <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
                 {r.market === "TW" ? "🇹🇼" : "🇺🇸"} 賣出 {r.sellDate}
-                {r.includeToday && <span className="ml-1 text-indigo-400">（含當日）</span>}
+                {r.includeToday && <span className="ml-1" style={{ color: "#818cf8" }}>（含當日）</span>}
               </span>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
-              <button onClick={() => toggleExpand(r)} title="查看走勢圖"
-                className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs border transition-colors cursor-pointer"
+              {/* Edit */}
+              <button onClick={() => setEditingId(isEditing ? null : r.id)} title="編輯"
+                className="p-1.5 rounded-lg border transition-colors cursor-pointer"
+                style={{ ...inputStyle, padding: "0.375rem", width: "auto",
+                  background: isEditing ? "#4f46e5" : "var(--bg-input)",
+                  borderColor: isEditing ? "#4f46e5" : "var(--border)" }}>
+                <Pencil className="h-3.5 w-3.5" style={{ color: isEditing ? "#fff" : "var(--fg-muted)" }} />
+              </button>
+              {/* Chart toggle */}
+              <button onClick={() => toggleExpand(r)} title="走勢圖"
+                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs border transition-colors cursor-pointer"
                 style={{ ...inputStyle, padding: "0.25rem 0.5rem", width: "auto" }}>
                 {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                 <span style={{ color: "var(--fg-muted)" }}>走勢</span>
               </button>
+              {/* Refresh */}
               <button onClick={() => refreshRecord(r.id)} disabled={isLoading} title="重新查詢"
                 className="p-1.5 rounded-lg border transition-colors cursor-pointer disabled:opacity-40"
                 style={{ ...inputStyle, padding: "0.375rem", width: "auto" }}>
                 <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} style={{ color: "var(--fg-muted)" }} />
               </button>
+              {/* Delete */}
               <button onClick={() => deleteRecord(r.id)} title="刪除"
                 className="p-1.5 rounded-lg border transition-colors cursor-pointer hover:border-red-500/50"
                 style={{ ...inputStyle, padding: "0.375rem", width: "auto" }}>
@@ -299,7 +405,7 @@ export default function RecordsTab() {
             </div>
           </div>
 
-          {/* Stats */}
+          {/* Stats grid */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
               <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>賣出均價</p>
@@ -311,7 +417,7 @@ export default function RecordsTab() {
                 {r.includeToday ? "含當日最高價" : "賣出後最高價"}
               </p>
               {isLoading ? <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>查詢中...</p>
-                : r.fetchError ? <p className="text-xs text-red-500">{r.fetchError}</p>
+                : r.fetchError ? <p className="text-xs text-orange-500">{r.fetchError}</p>
                 : r.maxHigh != null ? <p className="text-sm font-medium text-yellow-500">{fmtP(r.maxHigh, currency)}</p>
                 : <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>}
             </div>
@@ -323,16 +429,16 @@ export default function RecordsTab() {
             </div>
             <div>
               <p className="text-xs mb-0.5" style={{ color: "var(--fg-subtle)" }}>
-                {isRegret ? "少賺了（負數）" : "躲過損失（正數）"}
+                {isRegret ? "少賺了（負）" : "躲過損失（正）"}
               </p>
               {isLoading ? <p className="text-sm animate-pulse" style={{ color: "var(--fg-subtle)" }}>—</p>
                 : displayAmt != null ? (
                   <>
                     <p className="text-sm font-bold" style={{ color: amountColor }}>
-                      {isRegret ? "-" : "+"}{fmtP(displayAmt, currency)}
+                      {isRegret ? "−" : "+"}{fmtP(displayAmt, currency)}
                     </p>
                     <p className="text-xs" style={{ color: amountColor }}>
-                      {isRegret ? "-" : "+"}{fmt(displayPct!, 1)}%
+                      {isRegret ? "−" : "+"}{fmt(displayPct!, 1)}%
                     </p>
                   </>
                 ) : <p className="text-sm" style={{ color: "var(--fg-subtle)" }}>—</p>}
@@ -346,8 +452,15 @@ export default function RecordsTab() {
           )}
         </div>
 
-        {/* Expanded chart */}
-        {isExpanded && (
+        {/* Edit form */}
+        {isEditing && (
+          <EditForm record={r}
+            onSave={(changes) => saveEdit(r.id, changes)}
+            onCancel={() => setEditingId(null)} />
+        )}
+
+        {/* Chart */}
+        {isExpanded && !isEditing && (
           <div className="border-t px-4 pb-4 pt-3" style={{ borderColor: "var(--border)" }}>
             <p className="text-xs font-medium mb-3" style={{ color: "var(--fg-muted)" }}>
               📈 {r.stockName ?? r.ticker} 走勢（{r.sellDate} ～ 今日）
@@ -357,7 +470,7 @@ export default function RecordsTab() {
                 <span className="text-sm animate-pulse">載入中...</span>
               </div>
             ) : chartRows.length === 0 ? (
-              <div className="h-24 flex items-center justify-center" style={{ color: "var(--fg-subtle)" }}>
+              <div className="h-16 flex items-center justify-center" style={{ color: "var(--fg-subtle)" }}>
                 <span className="text-sm">無法載入走勢資料</span>
               </div>
             ) : (
@@ -407,7 +520,7 @@ export default function RecordsTab() {
           <div className="rounded-2xl p-5" style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)" }}>
             <p className="text-xs mb-1" style={{ color: "var(--fg-muted)" }}>💊 後悔藥總損失（新台幣）</p>
             <p className="text-2xl font-bold text-red-500">
-              {regretRecords.length === 0 ? "—" : `-NT$ ${fmt(totalMissedTWD, 0)}`}
+              {regretRecords.length === 0 ? "—" : `−NT$ ${fmt(totalMissedTWD, 0)}`}
             </p>
             {hasUSD && usdToTwd && (
               <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>
@@ -421,14 +534,12 @@ export default function RecordsTab() {
             <p className="text-2xl font-bold text-emerald-500">
               {dodgedRecords.length === 0 ? "—" : `+NT$ ${fmt(totalSavedTWD, 0)}`}
             </p>
-            <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>
-              {dodgedRecords.length} 筆賣對了 🎉
-            </p>
+            <p className="text-xs mt-1" style={{ color: "var(--fg-subtle)" }}>{dodgedRecords.length} 筆賣對了 🎉</p>
           </div>
         </div>
       )}
 
-      {/* Header + Add */}
+      {/* Header + Add button */}
       <div className="flex justify-between items-center">
         <h2 className="font-semibold text-base" style={{ color: "var(--fg)" }}>
           我的紀錄{records.length > 0 && <span className="text-sm font-normal ml-1.5" style={{ color: "var(--fg-subtle)" }}>({records.length} 筆)</span>}
@@ -439,7 +550,7 @@ export default function RecordsTab() {
         </button>
       </div>
 
-      {/* ── Add Form ── */}
+      {/* Add Form */}
       {showForm && (
         <form onSubmit={handleSubmit} className="rounded-2xl p-5 space-y-5 fade-in" style={cardStyle}>
           {/* Market */}
@@ -450,8 +561,7 @@ export default function RecordsTab() {
                 <button key={m} type="button"
                   onClick={() => { setMarket(m); setTickerRaw(""); setResolved(null); setLookupState("idle"); setDayOHLC(null); }}
                   className="flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all cursor-pointer"
-                  style={market === m
-                    ? { background: "#4f46e5", borderColor: "#4f46e5", color: "#fff" }
+                  style={market === m ? { background: "#4f46e5", borderColor: "#4f46e5", color: "#fff" }
                     : { ...inputStyle, borderRadius: "0.75rem", padding: "0.625rem", width: "auto" }}>
                   {m === "TW" ? "🇹🇼 台股（TWSE）" : "🇺🇸 美股（Yahoo）"}
                 </button>
@@ -479,8 +589,8 @@ export default function RecordsTab() {
             <input required value={tickerRaw}
               onChange={e => setTickerRaw(market === "US" ? e.target.value.toUpperCase() : e.target.value)}
               placeholder={
-                market === "US" ? "美股代號，如 NVDA、AAPL、MSFT" :
-                twInputMode === "ticker" ? "台股代號，如 2330、0050、00878" :
+                market === "US" ? "美股代號，如 NVDA、AAPL" :
+                twInputMode === "ticker" ? "台股代號，如 2330、0050、1785" :
                 "公司名稱，如 台積電、和碩、聯發科"
               }
               style={inputStyle} />
@@ -494,62 +604,51 @@ export default function RecordsTab() {
           {/* Date + includeToday */}
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide mb-2 block" style={{ color: "var(--fg-muted)" }}>③ 賣出日期</label>
-            <input type="date" required value={sellDate}
-              max={new Date().toISOString().split("T")[0]}
-              onChange={e => setSellDate(e.target.value)}
-              style={{ ...inputStyle, colorScheme: "auto" }} />
+            <input type="date" required value={sellDate} max={new Date().toISOString().split("T")[0]}
+              onChange={e => setSellDate(e.target.value)} style={{ ...inputStyle, colorScheme: "auto" }} />
 
-            {/* includeToday checkbox */}
             <label className="flex items-center gap-2.5 mt-3 cursor-pointer select-none">
-              <div
-                onClick={() => setIncludeToday(v => !v)}
-                className="relative w-9 h-5 rounded-full transition-colors cursor-pointer"
-                style={{ background: includeToday ? "#4f46e5" : "var(--bg-hover)", border: "1px solid var(--border)" }}
-              >
-                <div className="absolute top-0.5 rounded-full w-4 h-4 bg-white shadow transition-all"
-                  style={{ left: includeToday ? "calc(100% - 1.125rem)" : "0.125rem" }} />
-              </div>
+              <Toggle value={includeToday} onChange={setIncludeToday} />
               <span className="text-sm" style={{ color: "var(--fg)" }}>計算當天最高價</span>
               <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>
-                {includeToday ? "含賣出當天一起比較" : "只比較賣出後的日期"}
+                {includeToday ? "含賣出當天" : "只算往後日期"}
               </span>
             </label>
 
-            {/* Day OHLC */}
-            {(dayLoading || dayOHLC) && (
-              <div className="mt-2 rounded-xl px-4 py-2.5 flex items-center gap-4"
-                style={{ background: "var(--bg-hover)", border: "1px solid var(--border)" }}>
+            {(dayLoading || dayOHLC || dayOHLCError) && (
+              <div className="mt-2 rounded-xl px-4 py-2.5" style={{ background: "var(--bg-hover)", border: "1px solid var(--border)" }}>
                 {dayLoading ? (
                   <span className="text-xs animate-pulse" style={{ color: "var(--fg-subtle)" }}>查詢當日行情...</span>
+                ) : dayOHLCError ? (
+                  <span className="text-xs" style={{ color: "var(--fg-subtle)" }}>ℹ️ {dayOHLCError}</span>
                 ) : dayOHLC && (
-                  <>
+                  <div className="flex items-center gap-4">
                     <div className="text-xs"><span style={{ color: "var(--fg-subtle)" }}>當日最高 </span><span className="font-semibold text-emerald-500">{fmt(dayOHLC.high)}</span></div>
                     <div className="text-xs"><span style={{ color: "var(--fg-subtle)" }}>最低 </span><span className="font-semibold text-red-500">{fmt(dayOHLC.low)}</span></div>
                     {dayOHLC.close && <div className="text-xs"><span style={{ color: "var(--fg-subtle)" }}>收盤 </span><span className="font-semibold" style={{ color: "var(--fg)" }}>{fmt(dayOHLC.close)}</span></div>}
-                  </>
+                  </div>
                 )}
               </div>
             )}
           </div>
 
-          {/* Price + shares */}
+          {/* Price + Shares */}
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide mb-2 block" style={{ color: "var(--fg-muted)" }}>④ 賣出條件</label>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-xs mb-1 block" style={{ color: "var(--fg-subtle)" }}>賣出均價 ({market === "TW" ? "NT$" : "USD"})</label>
+                <label style={labelStyle}>賣出均價 ({market === "TW" ? "NT$" : "USD"})</label>
                 <input type="number" required min="0.0001" step="any" placeholder="0.00"
                   value={sellPrice} onChange={e => setSellPrice(e.target.value)} style={inputStyle} />
               </div>
               <div>
-                <label className="text-xs mb-1 block" style={{ color: "var(--fg-subtle)" }}>股數（支援小數）</label>
+                <label style={labelStyle}>股數（支援小數）</label>
                 <input type="number" required min="0.0001" step="any" placeholder="1000"
                   value={shares} onChange={e => setShares(e.target.value)} style={inputStyle} />
               </div>
             </div>
           </div>
 
-          {/* Note */}
           <input placeholder="備註（選填）" value={note} onChange={e => setNote(e.target.value)} style={inputStyle} />
 
           <button type="submit"
@@ -559,28 +658,28 @@ export default function RecordsTab() {
         </form>
       )}
 
-      {/* ── Empty ── */}
+      {/* Empty */}
       {records.length === 0 && !showForm && (
         <div className="text-center py-16" style={{ color: "var(--fg-subtle)" }}>
           <div className="text-4xl mb-3">📭</div>
-          <p className="text-sm">還沒有紀錄，點「新增」開始記錄你賣飛的股票</p>
+          <p className="text-sm">還沒有紀錄，點「新增」開始記錄</p>
         </div>
       )}
 
-      {/* ── Pending / Error ── */}
+      {/* Pending / Error */}
       {(pendingRecords.length > 0 || errorRecords.length > 0) && (
         <div className="space-y-2">
           {[...pendingRecords, ...errorRecords].map(r => (
-            <div key={r.id} className="rounded-xl px-4 py-3 flex items-center justify-between gap-3" style={{ ...cardStyle }}>
-              <div className="flex items-center gap-2.5">
+            <div key={r.id} className="rounded-xl px-4 py-3 flex items-center justify-between gap-3" style={cardStyle}>
+              <div className="flex items-center gap-2.5 min-w-0">
                 {r.fetchError
-                  ? <AlertCircle className="h-4 w-4 text-red-400 shrink-0" />
+                  ? <AlertCircle className="h-4 w-4 text-orange-400 shrink-0" />
                   : <RefreshCw className="h-4 w-4 text-indigo-400 shrink-0 animate-spin" />}
-                <span className="text-sm font-mono" style={{ color: "var(--fg)" }}>{r.ticker}</span>
-                {r.stockName && <span className="text-sm" style={{ color: "var(--fg-muted)" }}>{r.stockName}</span>}
-                {r.fetchError && <span className="text-xs text-red-500">{r.fetchError}</span>}
+                <span className="text-sm font-mono shrink-0" style={{ color: "var(--fg)" }}>{r.ticker}</span>
+                {r.stockName && <span className="text-sm truncate" style={{ color: "var(--fg-muted)" }}>{r.stockName}</span>}
+                {r.fetchError && <span className="text-xs text-orange-500 truncate">{r.fetchError}</span>}
               </div>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 shrink-0">
                 {r.fetchError && (
                   <button onClick={() => refreshRecord(r.id)} disabled={loadingId === r.id}
                     className="inline-flex items-center gap-1 text-xs rounded-lg px-2.5 py-1 border cursor-pointer disabled:opacity-50"
@@ -598,7 +697,7 @@ export default function RecordsTab() {
         </div>
       )}
 
-      {/* ── 後悔藥 section ── */}
+      {/* 後悔藥 */}
       {regretRecords.length > 0 && (
         <Section title="後悔藥" icon={<AlertCircle className="h-4 w-4" style={{ color: "#ef4444" }} />}
           count={regretRecords.length} accentColor="#ef4444">
@@ -606,10 +705,10 @@ export default function RecordsTab() {
         </Section>
       )}
 
-      {/* ── 逃過一劫 section ── */}
+      {/* 逃過一劫 */}
       {dodgedRecords.length > 0 && (
         <Section title="逃過一劫" icon={<ShieldCheck className="h-4 w-4" style={{ color: "#22c55e" }} />}
-          count={dodgedRecords.length} accentColor="#22c55e" defaultOpen={true}>
+          count={dodgedRecords.length} accentColor="#22c55e">
           {dodgedRecords.map(r => <RecordCard key={r.id} r={r} isRegret={false} />)}
         </Section>
       )}
